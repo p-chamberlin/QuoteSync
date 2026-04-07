@@ -17,20 +17,48 @@ from pydantic import BaseModel, Field
 # --- Enums ---
 
 class EntityType(str, Enum):
-    LLC = "LLC"
+    ASSOCIATION = "Association"
+    COMMON_OWNERSHIP = "Common Ownership"
     CORPORATION = "Corporation"
-    SOLE_PROP = "Sole Proprietorship"
+    EXECUTOR_OR_TRUSTEE = "Executor or Trustee"
+    GOVERNMENTAL_ENTITY = "Governmental Entity"
+    INDIVIDUAL = "Individual"
+    JOINT_EMPLOYERS = "Joint Employers"
+    JOINT_VENTURE = "Joint Venture"
+    LABOR_UNION = "Labor Union"
+    LLC = "Limited Liability Company (LLC)"
+    LLP = "Limited Liability Partnership"
+    LIMITED_PARTNERSHIP = "Limited Partnership"
+    MULTIPLE_STATUS = "Multiple Status"
+    ORGANIZATION = "Organization, including a Corporation (but not including a Partnership, Joint Venture or Limited Liability Company)"
+    OTHER = "Other"
     PARTNERSHIP = "Partnership"
-    S_CORP = "S-Corporation"
-    NON_PROFIT = "Non-Profit"
+    RELIGIOUS_ORGANIZATION = "Religious Organization"
+    TRUST = "Trust"
+    TRUST_OR_ESTATE = "Trust or Estate"
 
 
 class ConstructionType(str, Enum):
     FRAME = "Frame"
     JOISTED_MASONRY = "Joisted Masonry"
-    MASONRY = "Masonry Non-Combustible"
+    NON_COMBUSTIBLE = "Non-Combustible"
     FIRE_RESISTIVE = "Fire Resistive"
     MODIFIED_FIRE_RESISTIVE = "Modified Fire Resistive"
+
+
+class OccupiedBy(str, Enum):
+    OWNER = "Owner Occupied"
+    NON_OWNER = "Non owner"
+
+
+class DistanceToHydrant(str, Enum):
+    WITHIN_1000 = "1 to 1,000 Ft"
+    OVER_1000 = "Over 1,000 Ft"
+
+
+class InsuredType(str, Enum):
+    INDIVIDUAL = "Individual"
+    ORGANIZATION = "Organization"
 
 
 class RiskClass(str, Enum):
@@ -65,9 +93,11 @@ class Address(BaseModel):
 
 class Location(BaseModel):
     address: Address = Field(default_factory=Address)
+    same_as_mailing: Optional[bool] = None
     owned_or_leased: str = ""  # "Owned" or "Leased"
     square_footage: Optional[int] = None
     year_built: Optional[int] = None
+    distance_to_hydrant: Optional[DistanceToHydrant] = None
 
 
 class Claim(BaseModel):
@@ -102,25 +132,40 @@ class GLDetails(BaseModel):
 # --- Property specifics ---
 
 class PropertyDetails(BaseModel):
+    building_description: str = ""
     building_value: Optional[float] = None
+    valuation: str = "Replacement Cost"
     bpp_value: Optional[float] = None  # Business Personal Property
+    annual_gross_receipts: Optional[float] = None
     business_income_limit: Optional[float] = None
     construction_type: Optional[ConstructionType] = None
+    occupied_by: Optional[OccupiedBy] = None
     square_footage: Optional[int] = None
     year_built: Optional[int] = None
+    number_of_stories: Optional[int] = None
     roof_year_updated: Optional[int] = None
     roof_material: str = ""
     electrical_year_updated: Optional[int] = None
-    electrical_type: str = ""
+    electrical_amp_service: str = ""
+    electrical_box_type: str = ""
+    electrical_wiring_type: str = ""
     plumbing_year_updated: Optional[int] = None
     hvac_year_updated: Optional[int] = None
+    heating_service: str = ""
     sprinklered: Optional[bool] = None
     any_vacant_portions: Optional[bool] = None
     burglar_alarm: Optional[bool] = None
     fire_alarm: Optional[bool] = None
+    fire_extinguishers: Optional[bool] = None
+    smoke_detectors: Optional[bool] = None
+    security_cameras: Optional[bool] = None
     central_station_monitored: Optional[bool] = None
     mortgagee_name: str = ""
     mortgagee_address: str = ""
+    # BOP classification
+    business_owner_class: str = ""
+    property_deductible: str = "$1,000"
+    inflation_guard: str = "5%"
 
 
 # --- Class-specific questions ---
@@ -160,15 +205,23 @@ class ProspectProfile(BaseModel):
     """The single source of truth for a prospect/risk."""
 
     # 1. Named Insured & Business Info
+    insured_type: Optional[InsuredType] = None  # Individual or Organization
     legal_business_name: str = ""
+    first_name: str = ""
+    last_name: str = ""
+    middle_initial: str = ""
+    suffix: str = ""
+    date_of_birth: Optional[date] = None
     dba: str = ""
     fein: str = ""
     entity_type: Optional[EntityType] = None
     year_established: Optional[int] = None
+    years_in_business: str = ""  # e.g. "10+ years" for MMG dropdown
     website: str = ""
     contact_name: str = ""
     contact_title: str = ""
     contact_phone: str = ""
+    contact_phone_type: str = ""  # e.g. "Business", "Cell", "Home"
     contact_email: str = ""
     risk_class: Optional[RiskClass] = None
 
@@ -206,10 +259,17 @@ class ProspectProfile(BaseModel):
     professional: ProfessionalDetails = Field(default_factory=ProfessionalDetails)
     manufacturer: ManufacturerDetails = Field(default_factory=ManufacturerDetails)
 
-    # 8. Loss History
+    # 8. Loss History & Underwriting
     claims: list[Claim] = Field(default_factory=list)
     any_claims_over_25k: Optional[bool] = None
     currently_insured: Optional[bool] = None
+    agency_manages_current_policy: Optional[bool] = None
+    current_carrier: str = ""
+    continuous_coverage: Optional[bool] = None
+    convicted_of_felony: Optional[bool] = None
+    filed_bankruptcy: Optional[bool] = None
+    operates_other_businesses: Optional[bool] = None
+    losses_past_3_years: Optional[bool] = None
     reason_for_shopping: str = ""
 
     # 9. Prior Insurance

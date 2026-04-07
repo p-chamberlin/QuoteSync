@@ -111,14 +111,15 @@ def _coerce_value(key: str, value: str):
     int_fields = {
         "year_established", "pct_work_subcontracted", "num_employees_ft",
         "num_employees_pt", "num_owners_officers", "square_footage",
-        "year_built", "roof_year_updated", "electrical_year_updated",
-        "plumbing_year_updated", "hvac_year_updated", "number_of_units",
+        "year_built", "number_of_stories", "roof_year_updated",
+        "electrical_year_updated", "plumbing_year_updated", "hvac_year_updated",
+        "number_of_units",
     }
     float_fields = {
         "gross_revenue_current", "gross_revenue_prior", "total_annual_payroll",
         "building_value", "bpp_value", "business_income_limit",
-        "largest_single_job_value", "amount_paid", "amount_reserved",
-        "annual_premium",
+        "annual_gross_receipts", "largest_single_job_value",
+        "amount_paid", "amount_reserved", "annual_premium",
     }
     if key in int_fields:
         try:

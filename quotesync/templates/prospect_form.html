@@ -14,8 +14,28 @@
         <legend>1. Named Insured & Business Info</legend>
         <div class="form-grid">
             <div class="form-group">
-                <label for="legal_business_name">Legal Business Name *</label>
-                <input type="text" id="legal_business_name" name="legal_business_name" value="{{ profile.legal_business_name }}" required>
+                <label for="insured_type">Insured Type</label>
+                <select id="insured_type" name="insured_type">
+                    <option value="">-- Select --</option>
+                    <option value="Individual" {{ 'selected' if profile.insured_type and profile.insured_type.value == 'Individual' }}>Individual</option>
+                    <option value="Organization" {{ 'selected' if profile.insured_type and profile.insured_type.value == 'Organization' }}>Organization</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="legal_business_name">Business / Organization Name</label>
+                <input type="text" id="legal_business_name" name="legal_business_name" value="{{ profile.legal_business_name }}">
+            </div>
+            <div class="form-group">
+                <label for="first_name">First Name</label>
+                <input type="text" id="first_name" name="first_name" value="{{ profile.first_name }}">
+            </div>
+            <div class="form-group">
+                <label for="last_name">Last Name</label>
+                <input type="text" id="last_name" name="last_name" value="{{ profile.last_name }}">
+            </div>
+            <div class="form-group">
+                <label for="date_of_birth">Date of Birth</label>
+                <input type="date" id="date_of_birth" name="date_of_birth" value="{{ profile.date_of_birth or '' }}">
             </div>
             <div class="form-group">
                 <label for="dba">DBA (if any)</label>
@@ -29,17 +49,32 @@
                 <label for="entity_type">Entity Type</label>
                 <select id="entity_type" name="entity_type">
                     <option value="">-- Select --</option>
-                    <option value="LLC" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'LLC' }}>LLC</option>
+                    <option value="Association" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Association' }}>Association</option>
+                    <option value="Common Ownership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Common Ownership' }}>Common Ownership</option>
                     <option value="Corporation" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Corporation' }}>Corporation</option>
-                    <option value="Sole Proprietorship" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Sole Proprietorship' }}>Sole Proprietorship</option>
+                    <option value="Executor or Trustee" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Executor or Trustee' }}>Executor or Trustee</option>
+                    <option value="Individual" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Individual' }}>Individual</option>
+                    <option value="Joint Venture" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Joint Venture' }}>Joint Venture</option>
+                    <option value="Limited Liability Company (LLC)" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Limited Liability Company (LLC)' }}>Limited Liability Company (LLC)</option>
+                    <option value="Limited Liability Partnership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Limited Liability Partnership' }}>Limited Liability Partnership</option>
+                    <option value="Limited Partnership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Limited Partnership' }}>Limited Partnership</option>
                     <option value="Partnership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Partnership' }}>Partnership</option>
-                    <option value="S-Corporation" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'S-Corporation' }}>S-Corporation</option>
-                    <option value="Non-Profit" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Non-Profit' }}>Non-Profit</option>
+                    <option value="Other" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Other' }}>Other</option>
                 </select>
             </div>
             <div class="form-group">
                 <label for="year_established">Year Established</label>
                 <input type="number" id="year_established" name="year_established" value="{{ profile.year_established or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="years_in_business">Years in Business</label>
+                <select id="years_in_business" name="years_in_business">
+                    <option value="">-- Select --</option>
+                    <option value="Less than 1 year" {{ 'selected' if profile.years_in_business == 'Less than 1 year' }}>Less than 1 year</option>
+                    <option value="1-3 years" {{ 'selected' if profile.years_in_business == '1-3 years' }}>1-3 years</option>
+                    <option value="4-9 years" {{ 'selected' if profile.years_in_business == '4-9 years' }}>4-9 years</option>
+                    <option value="10+ years" {{ 'selected' if profile.years_in_business == '10+ years' }}>10+ years</option>
+                </select>
             </div>
             <div class="form-group">
                 <label for="website">Website</label>
@@ -48,10 +83,6 @@
             <div class="form-group">
                 <label for="contact_name">Primary Contact Name</label>
                 <input type="text" id="contact_name" name="contact_name" value="{{ profile.contact_name }}">
-            </div>
-            <div class="form-group">
-                <label for="contact_title">Title</label>
-                <input type="text" id="contact_title" name="contact_title" value="{{ profile.contact_title }}">
             </div>
             <div class="form-group">
                 <label for="contact_phone">Phone</label>
@@ -242,20 +273,28 @@
         </div>
     </fieldset>
 
-    <!-- SECTION 6: Commercial Property -->
+    <!-- SECTION 6: Commercial Property / Building -->
     <fieldset>
-        <legend>6. Commercial Property</legend>
+        <legend>6. Commercial Property / Building</legend>
         <div class="form-grid">
+            <div class="form-group full-width">
+                <label for="property.building_description">Building Description</label>
+                <input type="text" id="property.building_description" name="property.building_description" value="{{ profile.property.building_description }}">
+            </div>
             <div class="form-group">
-                <label for="property.building_value">Building Value (Replacement Cost)</label>
+                <label for="property.building_value">Building Limit ($)</label>
                 <input type="text" id="property.building_value" name="property.building_value" value="{{ profile.property.building_value or '' }}" placeholder="$">
             </div>
             <div class="form-group">
-                <label for="property.bpp_value">Business Personal Property Value</label>
+                <label for="property.bpp_value">Business Personal Property Limit ($)</label>
                 <input type="text" id="property.bpp_value" name="property.bpp_value" value="{{ profile.property.bpp_value or '' }}" placeholder="$">
             </div>
             <div class="form-group">
-                <label for="property.business_income_limit">Business Income / Extra Expense Limit</label>
+                <label for="property.annual_gross_receipts">Annual Gross Receipts ($)</label>
+                <input type="text" id="property.annual_gross_receipts" name="property.annual_gross_receipts" value="{{ profile.property.annual_gross_receipts or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="property.business_income_limit">Business Income Limit ($)</label>
                 <input type="text" id="property.business_income_limit" name="property.business_income_limit" value="{{ profile.property.business_income_limit or '' }}" placeholder="$">
             </div>
             <div class="form-group">
@@ -264,9 +303,17 @@
                     <option value="">-- Select --</option>
                     <option value="Frame" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Frame' }}>Frame</option>
                     <option value="Joisted Masonry" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Joisted Masonry' }}>Joisted Masonry</option>
-                    <option value="Masonry Non-Combustible" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Masonry Non-Combustible' }}>Masonry Non-Combustible</option>
+                    <option value="Non-Combustible" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Non-Combustible' }}>Non-Combustible</option>
                     <option value="Fire Resistive" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Fire Resistive' }}>Fire Resistive</option>
                     <option value="Modified Fire Resistive" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Modified Fire Resistive' }}>Modified Fire Resistive</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="property.occupied_by">Occupied By</label>
+                <select id="property.occupied_by" name="property.occupied_by">
+                    <option value="">-- Select --</option>
+                    <option value="Owner Occupied" {{ 'selected' if profile.property.occupied_by and profile.property.occupied_by.value == 'Owner Occupied' }}>Owner Occupied</option>
+                    <option value="Non owner" {{ 'selected' if profile.property.occupied_by and profile.property.occupied_by.value == 'Non owner' }}>Non owner</option>
                 </select>
             </div>
             <div class="form-group">
@@ -278,27 +325,43 @@
                 <input type="number" id="property.year_built" name="property.year_built" value="{{ profile.property.year_built or '' }}">
             </div>
             <div class="form-group">
-                <label for="property.roof_year_updated">Roof: Year Updated</label>
+                <label for="property.number_of_stories">Number of Stories</label>
+                <input type="number" id="property.number_of_stories" name="property.number_of_stories" value="{{ profile.property.number_of_stories or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.roof_year_updated">Roof (Year)</label>
                 <input type="number" id="property.roof_year_updated" name="property.roof_year_updated" value="{{ profile.property.roof_year_updated or '' }}">
             </div>
             <div class="form-group">
-                <label for="property.roof_material">Roof Material</label>
-                <input type="text" id="property.roof_material" name="property.roof_material" value="{{ profile.property.roof_material }}">
-            </div>
-            <div class="form-group">
-                <label for="property.electrical_year_updated">Electrical: Year Updated</label>
+                <label for="property.electrical_year_updated">Electrical (Year)</label>
                 <input type="number" id="property.electrical_year_updated" name="property.electrical_year_updated" value="{{ profile.property.electrical_year_updated or '' }}">
             </div>
             <div class="form-group">
-                <label for="property.plumbing_year_updated">Plumbing: Year Updated</label>
+                <label for="property.electrical_amp_service">Electrical - AMP Service</label>
+                <input type="text" id="property.electrical_amp_service" name="property.electrical_amp_service" value="{{ profile.property.electrical_amp_service }}">
+            </div>
+            <div class="form-group">
+                <label for="property.electrical_box_type">Electrical - Box Type</label>
+                <input type="text" id="property.electrical_box_type" name="property.electrical_box_type" value="{{ profile.property.electrical_box_type }}">
+            </div>
+            <div class="form-group">
+                <label for="property.electrical_wiring_type">Electrical - Wiring Type</label>
+                <input type="text" id="property.electrical_wiring_type" name="property.electrical_wiring_type" value="{{ profile.property.electrical_wiring_type }}">
+            </div>
+            <div class="form-group">
+                <label for="property.plumbing_year_updated">Plumbing (Year)</label>
                 <input type="number" id="property.plumbing_year_updated" name="property.plumbing_year_updated" value="{{ profile.property.plumbing_year_updated or '' }}">
             </div>
             <div class="form-group">
-                <label for="property.hvac_year_updated">HVAC: Year Updated</label>
+                <label for="property.hvac_year_updated">Heating (Year)</label>
                 <input type="number" id="property.hvac_year_updated" name="property.hvac_year_updated" value="{{ profile.property.hvac_year_updated or '' }}">
             </div>
             <div class="form-group">
-                <label for="property.sprinklered">Sprinklered?</label>
+                <label for="property.heating_service">Heating Service Type</label>
+                <input type="text" id="property.heating_service" name="property.heating_service" value="{{ profile.property.heating_service }}">
+            </div>
+            <div class="form-group">
+                <label for="property.sprinklered">Automatic Sprinkler System?</label>
                 <select id="property.sprinklered" name="property.sprinklered">
                     <option value="">-- Select --</option>
                     <option value="true" {{ 'selected' if profile.property.sprinklered == true }}>Yes</option>
@@ -306,28 +369,32 @@
                 </select>
             </div>
             <div class="form-group">
-                <label for="property.burglar_alarm">Burglar Alarm?</label>
-                <select id="property.burglar_alarm" name="property.burglar_alarm">
+                <label for="property.fire_extinguishers">Fire Extinguishers?</label>
+                <select id="property.fire_extinguishers" name="property.fire_extinguishers">
                     <option value="">-- Select --</option>
-                    <option value="true" {{ 'selected' if profile.property.burglar_alarm == true }}>Yes</option>
-                    <option value="false" {{ 'selected' if profile.property.burglar_alarm == false }}>No</option>
+                    <option value="true" {{ 'selected' if profile.property.fire_extinguishers == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.property.fire_extinguishers == false }}>No</option>
                 </select>
             </div>
             <div class="form-group">
-                <label for="property.fire_alarm">Fire Alarm?</label>
-                <select id="property.fire_alarm" name="property.fire_alarm">
+                <label for="property.smoke_detectors">Smoke Detectors?</label>
+                <select id="property.smoke_detectors" name="property.smoke_detectors">
                     <option value="">-- Select --</option>
-                    <option value="true" {{ 'selected' if profile.property.fire_alarm == true }}>Yes</option>
-                    <option value="false" {{ 'selected' if profile.property.fire_alarm == false }}>No</option>
+                    <option value="true" {{ 'selected' if profile.property.smoke_detectors == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.property.smoke_detectors == false }}>No</option>
                 </select>
             </div>
             <div class="form-group">
-                <label for="property.central_station_monitored">Central Station Monitored?</label>
-                <select id="property.central_station_monitored" name="property.central_station_monitored">
+                <label for="property.security_cameras">Security Cameras?</label>
+                <select id="property.security_cameras" name="property.security_cameras">
                     <option value="">-- Select --</option>
-                    <option value="true" {{ 'selected' if profile.property.central_station_monitored == true }}>Yes</option>
-                    <option value="false" {{ 'selected' if profile.property.central_station_monitored == false }}>No</option>
+                    <option value="true" {{ 'selected' if profile.property.security_cameras == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.property.security_cameras == false }}>No</option>
                 </select>
+            </div>
+            <div class="form-group full-width">
+                <label for="property.business_owner_class">Business Owner Class (ISO Code)</label>
+                <input type="text" id="property.business_owner_class" name="property.business_owner_class" value="{{ profile.property.business_owner_class }}" placeholder="e.g. Office - Professional">
             </div>
             <div class="form-group full-width">
                 <label for="property.mortgagee_name">Mortgagee / Loss Payee Name</label>
@@ -461,9 +528,9 @@
         </div>
     </fieldset>
 
-    <!-- SECTION 8: Loss History & Prior Insurance -->
+    <!-- SECTION 8: Underwriting & Loss History -->
     <fieldset>
-        <legend>8. Loss History & Prior Insurance</legend>
+        <legend>8. Underwriting & Loss History</legend>
         <div class="form-grid">
             <div class="form-group">
                 <label for="currently_insured">Currently Insured?</label>
@@ -474,27 +541,55 @@
                 </select>
             </div>
             <div class="form-group">
-                <label for="any_claims_over_25k">Any Claims Over $25K?</label>
-                <select id="any_claims_over_25k" name="any_claims_over_25k">
+                <label for="current_carrier">Current Carrier</label>
+                <input type="text" id="current_carrier" name="current_carrier" value="{{ profile.current_carrier }}">
+            </div>
+            <div class="form-group">
+                <label for="continuous_coverage">Maintained Continuous Coverage?</label>
+                <select id="continuous_coverage" name="continuous_coverage">
                     <option value="">-- Select --</option>
-                    <option value="true" {{ 'selected' if profile.any_claims_over_25k == true }}>Yes</option>
-                    <option value="false" {{ 'selected' if profile.any_claims_over_25k == false }}>No</option>
+                    <option value="true" {{ 'selected' if profile.continuous_coverage == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.continuous_coverage == false }}>No</option>
                 </select>
             </div>
             <div class="form-group">
-                <label for="coverage_gaps_last_3_years">Coverage Gaps (Last 3 Years)?</label>
-                <select id="coverage_gaps_last_3_years" name="coverage_gaps_last_3_years">
-                    <option value="">-- Select --</option>
-                    <option value="true" {{ 'selected' if profile.coverage_gaps_last_3_years == true }}>Yes</option>
-                    <option value="false" {{ 'selected' if profile.coverage_gaps_last_3_years == false }}>No</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label for="non_renewals_or_cancellations">Non-Renewals or Cancellations?</label>
+                <label for="non_renewals_or_cancellations">Non-Renewals or Cancellations (3 yrs)?</label>
                 <select id="non_renewals_or_cancellations" name="non_renewals_or_cancellations">
                     <option value="">-- Select --</option>
                     <option value="true" {{ 'selected' if profile.non_renewals_or_cancellations == true }}>Yes</option>
                     <option value="false" {{ 'selected' if profile.non_renewals_or_cancellations == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="convicted_of_felony">Convicted of a Felony?</label>
+                <select id="convicted_of_felony" name="convicted_of_felony">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.convicted_of_felony == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.convicted_of_felony == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="filed_bankruptcy">Filed Bankruptcy (10 yrs)?</label>
+                <select id="filed_bankruptcy" name="filed_bankruptcy">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.filed_bankruptcy == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.filed_bankruptcy == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="operates_other_businesses">Operates Other Businesses?</label>
+                <select id="operates_other_businesses" name="operates_other_businesses">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.operates_other_businesses == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.operates_other_businesses == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="losses_past_3_years">Losses in Past 3 Years?</label>
+                <select id="losses_past_3_years" name="losses_past_3_years">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.losses_past_3_years == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.losses_past_3_years == false }}>No</option>
                 </select>
             </div>
             <div class="form-group full-width">
