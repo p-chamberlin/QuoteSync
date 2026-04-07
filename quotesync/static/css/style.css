@@ -1,22 +1,25 @@
-/* QuoteSync — Clean, professional styling */
+/* QuoteSync — Allen Insurance & Financial branded styling */
 
 :root {
-    --primary: #1a56db;
-    --primary-hover: #1648b8;
+    --primary: #002857;
+    --primary-hover: #001a38;
+    --primary-light: #003f87;
+    --accent: #006cb5;
+    --accent-light: #2d8fc7;
     --danger: #dc2626;
     --success: #16a34a;
-    --bg: #f8fafc;
+    --bg: #f5f7fa;
     --card-bg: #ffffff;
-    --border: #e2e8f0;
-    --text: #1e293b;
-    --text-muted: #64748b;
-    --radius: 8px;
+    --border: #d8dee6;
+    --text: #171717;
+    --text-muted: #5a6577;
+    --radius: 6px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--bg);
     color: var(--text);
     line-height: 1.6;
@@ -24,8 +27,8 @@ body {
 
 /* Navbar */
 .navbar {
-    background: var(--card-bg);
-    border-bottom: 1px solid var(--border);
+    background: var(--primary);
+    border-bottom: 3px solid var(--accent);
     padding: 1rem 2rem;
     display: flex;
     align-items: center;
@@ -34,16 +37,17 @@ body {
 .logo {
     font-size: 1.4rem;
     font-weight: 700;
-    color: var(--primary);
+    color: #ffffff;
     text-decoration: none;
+    letter-spacing: 0.5px;
 }
 .nav-links a {
     margin-left: 1.5rem;
     text-decoration: none;
-    color: var(--text-muted);
+    color: rgba(255, 255, 255, 0.8);
     font-weight: 500;
 }
-.nav-links a:hover { color: var(--primary); }
+.nav-links a:hover { color: #ffffff; }
 
 /* Container */
 .container {
@@ -74,8 +78,8 @@ body {
     font-weight: 500;
 }
 .btn:hover { background: var(--bg); }
-.btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
-.btn-primary:hover { background: var(--primary-hover); }
+.btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn-primary:hover { background: var(--primary); border-color: var(--primary); }
 .btn-danger { color: var(--danger); border-color: var(--danger); }
 .btn-danger:hover { background: #fef2f2; }
 .btn-sm { padding: 0.3rem 0.8rem; font-size: 0.8rem; }
@@ -96,7 +100,8 @@ body {
     border-bottom: 1px solid var(--border);
 }
 .prospect-table th { background: var(--bg); font-weight: 600; font-size: 0.85rem; text-transform: uppercase; color: var(--text-muted); }
-.prospect-table a { color: var(--primary); text-decoration: none; font-weight: 500; }
+.prospect-table a { color: var(--accent); text-decoration: none; font-weight: 500; }
+.prospect-table a:hover { color: var(--primary); }
 .inline-form { display: inline; }
 
 /* Empty state */
@@ -126,6 +131,7 @@ body {
     font-size: 1.1rem;
     padding: 0 0.5rem;
     color: var(--primary);
+    letter-spacing: 0.3px;
 }
 
 .form-grid {
@@ -155,8 +161,8 @@ body {
 .form-group select:focus,
 .form-group textarea:focus {
     outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(26, 86, 219, 0.1);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0, 108, 181, 0.12);
 }
 
 .form-actions {
