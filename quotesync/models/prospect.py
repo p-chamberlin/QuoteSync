@@ -40,6 +40,7 @@ class EntityType(str, Enum):
 
 class ConstructionType(str, Enum):
     FRAME = "Frame"
+    FRAME_WITH_MASONRY_VENEER = "Frame with Masonry Veneer"
     JOISTED_MASONRY = "Joisted Masonry"
     NON_COMBUSTIBLE = "Non-Combustible"
     FIRE_RESISTIVE = "Fire Resistive"
