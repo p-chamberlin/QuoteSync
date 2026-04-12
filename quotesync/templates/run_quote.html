@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}QuoteSync — Run Quote{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Run Quote</h1>
+</div>
+
+<form method="POST" action="{{ url_for('run_quote_start') }}" class="run-quote-form">
+    <fieldset>
+        <legend>1. Select Prospect</legend>
+        {% if prospects %}
+        <div class="form-group">
+            <select name="prospect" required>
+                <option value="">— Choose a prospect —</option>
+                {% for p in prospects %}
+                <option value="{{ p.filename }}">{{ p.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% else %}
+        <p class="hint">No prospects saved yet. <a href="{{ url_for('new_prospect') }}">Create one first</a>.</p>
+        {% endif %}
+    </fieldset>
+
+    <fieldset>
+        <legend>2. Select Carrier</legend>
+        <div class="carrier-grid">
+            {% for c in carriers %}
+            <label class="carrier-card {% if not c.configured %}carrier-disabled{% endif %}">
+                <input type="radio" name="carrier" value="{{ c.id }}" {% if not c.configured %}disabled{% endif %} required>
+                <span class="carrier-name">{{ c.name }}</span>
+                {% if c.configured %}
+                <span class="carrier-status carrier-ready">Ready</span>
+                {% else %}
+                <span class="carrier-status carrier-missing">No credentials</span>
+                {% endif %}
+            </label>
+            {% endfor %}
+        </div>
+        <p class="hint">Configure credentials in <code>.env</code> to enable carriers.</p>
+    </fieldset>
+
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-lg">Run Quote</button>
+    </div>
+</form>
+
+{% if runs %}
+<fieldset class="run-history">
+    <legend>Recent Runs</legend>
+    <table class="prospect-table">
+        <thead>
+            <tr>
+                <th>Prospect</th>
+                <th>Carrier</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for run_id, run in runs.items() %}
+            <tr>
+                <td>{{ run.prospect }}</td>
+                <td>{{ run.carrier_name }}</td>
+                <td>
+                    {% if run.status == 'running' %}
+                    <span class="status-badge status-running">Running</span>
+                    {% elif run.status == 'completed' %}
+                    <span class="status-badge status-completed">Completed</span>
+                    {% elif run.status == 'error' %}
+                    <span class="status-badge status-error" title="{{ run.error }}">Error</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if run.status != 'running' %}
+                    <form method="POST" action="{{ url_for('run_quote_clear', run_id=run_id) }}" class="inline-form">
+                        <button type="submit" class="btn btn-sm">Clear</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</fieldset>
+{% endif %}
+{% endblock %}

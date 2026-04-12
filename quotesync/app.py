@@ -5,13 +5,20 @@ A local web app where you fill out a prospect profile and kick off
 carrier portal automation.
 """
 
+import asyncio
 import json
+import logging
 import os
+import threading
 from pathlib import Path
 
 from flask import Flask, flash, redirect, render_template, request, url_for
 
+from quotesync.config import get_carrier_list, load_adapter
+from quotesync.engine import run_carrier, load_profile
 from quotesync.models.prospect import ProspectProfile
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -83,6 +90,90 @@ def delete_prospect(filename):
         filepath.unlink()
         flash("Prospect deleted.", "success")
     return redirect(url_for("index"))
+
+
+# ---------------------------------------------------------------------------
+# Run Quote
+# ---------------------------------------------------------------------------
+
+# In-memory store for quote run status (simple dict — no DB needed for local use)
+_quote_runs: dict[str, dict] = {}
+
+
+@app.route("/run")
+def run_quote_select():
+    """Select a prospect and carrier to run a quote."""
+    prospects = []
+    for f in sorted(DATA_DIR.glob("*.json")):
+        data = json.loads(f.read_text())
+        prospects.append({
+            "filename": f.stem,
+            "name": data.get("legal_business_name", "Unnamed"),
+        })
+    carriers = get_carrier_list()
+    return render_template("run_quote.html", prospects=prospects, carriers=carriers, runs=_quote_runs)
+
+
+@app.route("/run/start", methods=["POST"])
+def run_quote_start():
+    """Launch a carrier adapter in a background thread."""
+    prospect_file = request.form.get("prospect")
+    carrier_id = request.form.get("carrier")
+
+    if not prospect_file or not carrier_id:
+        flash("Please select both a prospect and a carrier.", "error")
+        return redirect(url_for("run_quote_select"))
+
+    filepath = DATA_DIR / f"{prospect_file}.json"
+    if not filepath.exists():
+        flash("Prospect file not found.", "error")
+        return redirect(url_for("run_quote_select"))
+
+    # Load adapter
+    try:
+        adapter = load_adapter(carrier_id)
+    except ValueError as e:
+        flash(str(e), "error")
+        return redirect(url_for("run_quote_select"))
+
+    # Load profile
+    profile = load_profile(filepath)
+
+    # Create a run ID
+    run_id = f"{prospect_file}__{carrier_id}"
+    _quote_runs[run_id] = {
+        "prospect": prospect_file,
+        "carrier": carrier_id,
+        "carrier_name": adapter.name,
+        "status": "running",
+        "error": None,
+    }
+
+    # Launch in background thread
+    def _run():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_carrier(adapter, profile, headed=True))
+            _quote_runs[run_id]["status"] = "completed"
+            logger.info("Quote run completed: %s", run_id)
+        except Exception as e:
+            _quote_runs[run_id]["status"] = "error"
+            _quote_runs[run_id]["error"] = str(e)
+            logger.error("Quote run failed: %s — %s", run_id, e)
+
+    thread = threading.Thread(target=_run, daemon=True, name=f"quote-{run_id}")
+    thread.start()
+
+    flash(f"Started {adapter.name} quote for '{prospect_file}'. Browser will open shortly.", "success")
+    return redirect(url_for("run_quote_select"))
+
+
+@app.route("/run/<run_id>/clear", methods=["POST"])
+def run_quote_clear(run_id):
+    """Clear a completed/errored run from the status list."""
+    _quote_runs.pop(run_id, None)
+    return redirect(url_for("run_quote_select"))
 
 
 def _parse_form_to_profile(form: dict) -> dict:

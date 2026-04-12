@@ -172,8 +172,75 @@ body {
     padding-bottom: 3rem;
 }
 
+/* Run Quote page */
+.run-quote-form fieldset {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    background: var(--card-bg);
+}
+.run-quote-form legend {
+    font-weight: 700;
+    font-size: 1.1rem;
+    padding: 0 0.5rem;
+    color: var(--primary);
+}
+.run-quote-form select {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    font-family: inherit;
+}
+.run-quote-form select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(0, 108, 181, 0.12);
+}
+
+.carrier-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+.carrier-card {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem;
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    background: var(--card-bg);
+    transition: border-color 0.15s;
+}
+.carrier-card:hover { border-color: var(--accent); }
+.carrier-card input[type="radio"] { accent-color: var(--accent); }
+.carrier-card input[type="radio"]:checked ~ .carrier-name { color: var(--accent); font-weight: 600; }
+.carrier-name { flex: 1; font-size: 0.95rem; }
+.carrier-status { font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.5rem; border-radius: 3px; }
+.carrier-ready { background: #f0fdf4; color: var(--success); }
+.carrier-missing { background: #fef2f2; color: var(--danger); }
+.carrier-disabled { opacity: 0.5; cursor: not-allowed; }
+.carrier-disabled:hover { border-color: var(--border); }
+
+.hint { font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem; }
+.hint a { color: var(--accent); }
+.hint code { background: var(--bg); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.85rem; }
+
+.run-history { margin-top: 2rem; }
+
+.status-badge { font-size: 0.8rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 3px; }
+.status-running { background: #fef9c3; color: #a16207; }
+.status-completed { background: #f0fdf4; color: var(--success); }
+.status-error { background: #fef2f2; color: var(--danger); }
+
 /* Responsive */
 @media (max-width: 640px) {
     .form-grid { grid-template-columns: 1fr; }
+    .carrier-grid { grid-template-columns: 1fr; }
     .navbar { flex-direction: column; gap: 0.5rem; }
 }
