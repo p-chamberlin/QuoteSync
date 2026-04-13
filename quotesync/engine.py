@@ -30,9 +30,12 @@ async def run_carrier(adapter: CarrierAdapter, profile: ProspectProfile, headed:
             await adapter.run(page, profile)
             print(f"[QuoteSync] Completed: {adapter.name}")
         except Exception as e:
+            import traceback
             print(f"[QuoteSync] Error with {adapter.name}: {e}")
-            # Keep browser open so user can see what happened
-            input("Press Enter to close the browser...")
+            traceback.print_exc()
+            # Keep browser open for 5 minutes so user can inspect what happened
+            print("[QuoteSync] Browser will stay open for 5 minutes — inspect the page, then it will close.")
+            await asyncio.sleep(300)
         finally:
             await browser.close()
 

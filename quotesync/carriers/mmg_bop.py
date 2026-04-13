@@ -57,17 +57,63 @@ MMG_LIABILITY_LIMITS_MAP = {
     "2M/4M": "$2,000,000",
 }
 
+TIMEOUT = 30000  # ms — consistent timeout for all waits
+NAV_SETTLE = 2000  # ms — short pause after clicks that trigger Angular re-renders
+
+
+async def _handle_address_validation(page) -> None:
+    """Handle the USPS address validation dialog (already known to be visible when called).
+
+    Selects the "Specified Address" radio, clicks Save & Continue, then waits for the dialog
+    to close. The caller is responsible for detecting that the dialog is present before calling.
+    """
+    try:
+        await page.locator("input[type='radio']").first.click()
+        await page.wait_for_timeout(500)
+        await page.locator("button:has-text('Save & Continue')").first.click()
+        # Wait for dialog to close
+        await page.wait_for_selector("text=Specified Address", state="hidden", timeout=10000)
+        print("[MMG] USPS address validation dialog handled — accepted specified address.")
+    except Exception as e:
+        print(f"[MMG] Warning: USPS dialog handling had an issue: {e}")
+
+
+async def choices_select(page, label: str, nth: int = -1) -> None:
+    """Select an option in a Choices.js dropdown by its label text.
+
+    The portal uses Choices.js for all dropdowns — native select_option does not work.
+    nth=-1 targets the last .choices__inner on the page (most recently added context).
+    Pass nth=0,1,2... to target a specific dropdown by index.
+    Matches by inner text (case-insensitive substring) so partial matches work.
+    """
+    triggers = page.locator(".choices__inner")
+    count = await triggers.count()
+    index = nth if nth >= 0 else count - 1
+    await triggers.nth(index).click()
+    # Wait for the open dropdown specifically — Choices.js adds 'is-open' to the active dropdown
+    await page.wait_for_selector(".choices.is-open .choices__item--selectable", timeout=TIMEOUT)
+    options = page.locator(".choices.is-open .choices__item--selectable")
+    opt_count = await options.count()
+    for i in range(opt_count):
+        opt = options.nth(i)
+        text = (await opt.inner_text()).strip()
+        if label.lower() in text.lower():
+            await opt.click()
+            await page.wait_for_timeout(500)
+            return
+    raise ValueError(f"choices_select: option '{label}' not found in open Choices.js dropdown")
+
 
 class MMGBopAdapter(CarrierAdapter):
     """Adapter for MMG Insurance BOP (Business Owner Policy) quotes."""
 
     name = "MMG Insurance — BOP"
-    login_url = "https://login.mmgins.com"
+    login_url = "https://agencyportal.mmgins.com/private/bop/portal/index"
 
     async def login(self, page: Page) -> None:
         """Log into MMG's MaineGate portal."""
-        # Wait for login form to load
-        await page.wait_for_selector("input[type='text'], input[type='email']", timeout=15000)
+        # Portal redirects to login.mmgins.com with proper OIDC params
+        await page.wait_for_selector("input[type='text'], input[type='email']", timeout=TIMEOUT)
 
         # Fill credentials
         inputs = await page.query_selector_all("input[type='text'], input[type='email']")
@@ -77,33 +123,41 @@ class MMGBopAdapter(CarrierAdapter):
         if password_input:
             await password_input.fill(self.password)
 
-        # Click Login button
-        await page.click("button:has-text('Login'), input[value='Login']")
+        await page.locator("button:has-text('Login'), input[value='Login']").first.click()
 
-        # Wait for redirect to dashboard
-        await page.wait_for_url("**/connect.mmgins.com/**", timeout=30000)
+        # Wait for OIDC redirect chain to fully complete before proceeding
+        await page.wait_for_url("**/connect.mmgins.com/**", timeout=TIMEOUT)
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
         print("[MMG] Logged in successfully.")
 
     async def navigate_to_new_quote(self, page: Page) -> None:
         """Navigate from dashboard to start a new BOP quote."""
-        # Click "Start / Manage Quotes"
-        await page.click("a:has-text('Start / Manage Quotes')")
-        await page.wait_for_url("**/rating/quotes**", timeout=15000)
+        await page.goto("https://connect.mmgins.com/rating/quotes")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Select Commercial radio and Business Owner from Line of Business
-        await page.click("input[value='Commercial'], label:has-text('Commercial')")
-        await page.select_option("select", label="Business Owner")
-        await page.click("button:has-text('Continue'), input[value='Continue']")
+        # Wait for Angular form to render
+        await page.wait_for_selector("text=Line of Business", timeout=TIMEOUT)
+
+        # Ensure Commercial is selected (usually pre-selected)
+        commercial_label = page.locator("label:has-text('Commercial')").first
+        if await commercial_label.count() > 0:
+            await commercial_label.click()
+
+        # Select Line of Business — native select on connect.mmgins.com (not Choices.js)
+        await page.locator("select").last.select_option(label="Business Owner")
+        await page.wait_for_timeout(NAV_SETTLE)
+
+        await page.locator("button:has-text('Continue')").first.click()
 
         # Wait for BOP Quote List
-        await page.wait_for_selector("text=BOP Quote List", timeout=15000)
+        await page.wait_for_selector("text=BOP Quote List", timeout=TIMEOUT)
 
-        # Click Start New Quote
-        await page.click("button:has-text('Start New Quote'), a:has-text('Start New Quote')")
+        await page.locator("button:has-text('Start New Quote'), a:has-text('Start New Quote')").first.click()
 
-        # Wait for the quote form to load
-        await page.wait_for_url("**/agencyportal.mmgins.com/**", timeout=30000)
-        await page.wait_for_selector("text=General Info", timeout=15000)
+        # Wait for the BOP quote form on agencyportal
+        await page.wait_for_url("**/agencyportal.mmgins.com/**", timeout=TIMEOUT)
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
+        await page.wait_for_selector("text=General Info", timeout=TIMEOUT)
         print("[MMG] New BOP quote started.")
 
     async def fill_quote(self, page: Page, profile: ProspectProfile) -> None:
@@ -115,7 +169,6 @@ class MMGBopAdapter(CarrierAdapter):
         await self._fill_location(page, profile)
         await self._fill_coverages(page, profile)
         await self._fill_additional_info(page, profile)
-        # Stop at Summary — user reviews and decides to bind or save
         print("[MMG] Quote form filled. Review the Summary and Billing pages manually.")
 
     # --- Page-by-page fill methods ---
@@ -123,368 +176,481 @@ class MMGBopAdapter(CarrierAdapter):
     async def _fill_general_info(self, page: Page, profile: ProspectProfile) -> None:
         """Policy > General Info page."""
         print("[MMG] Filling General Info...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Effective date
         if profile.effective_date:
             date_str = profile.effective_date.strftime("%m/%d/%Y")
-            date_input = page.locator("input[id*='effective'], input[name*='effective']").first
-            await date_input.clear()
-            await date_input.fill(date_str)
+            # Try multiple selector patterns for the date field
+            date_input = page.locator(
+                "input[id*='effective'], input[name*='effective'], "
+                "input[id*='date'], input[name*='date'], "
+                "input[type='date']"
+            ).first
+            try:
+                current_val = await date_input.input_value(timeout=5000)
+                if not current_val:
+                    await date_input.fill(date_str)
+                # If already filled, leave it — portal defaults to today
+            except Exception:
+                print("[MMG] Effective date field not found — leaving portal default.")
 
-        # Entity type
         if profile.entity_type:
             entity_text = profile.entity_type.value
-            await page.select_option("select", label=entity_text)
+            await choices_select(page, entity_text)
 
-        # Click Next
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Named Insured", timeout=15000)
+        # Click Next and wait until we actually leave General Info
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_function(
+            "() => !document.body.innerText.includes('This field is required')",
+            timeout=TIMEOUT
+        )
+        # Wait for unique Named Insured page content
+        await page.wait_for_selector("text=+ Named Insured", timeout=TIMEOUT)
 
     async def _fill_named_insured(self, page: Page, profile: ProspectProfile) -> None:
         """Policy > Named Insured(s) page."""
         print("[MMG] Filling Named Insured...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Click "+ Named Insured"
-        await page.click("button:has-text('Named Insured')")
-        await page.wait_for_selector("text=Add First Named Insured", timeout=10000)
+        # Click the "+ Named Insured" button to open the form
+        await page.locator("button:has-text('Named Insured')").first.click()
+        await page.wait_for_selector("text=Add First Named Insured", timeout=TIMEOUT)
 
-        is_org = profile.insured_type == InsuredType.ORGANIZATION or bool(profile.legal_business_name and not profile.first_name)
+        is_org = profile.insured_type == InsuredType.ORGANIZATION or bool(
+            profile.legal_business_name and not profile.first_name
+        )
 
         if is_org:
-            # Click Organization radio
-            org_radio = page.locator("text=Organization").first
-            await org_radio.click()
-            await page.wait_for_selector("text=Organization Name", timeout=5000)
+            await page.locator("label", has_text="Organization").first.click()
+            await page.wait_for_selector("text=Organization Name", timeout=TIMEOUT)
 
-            # Organization Name
-            await page.fill("input[id*='organization'], input[name*='organization']", profile.legal_business_name)
-
-            # FEIN
+            # All inputs use GUID-based IDs — target by label text proximity
+            await page.locator("text=Organization Name").locator("xpath=following::input[1]").fill(
+                profile.legal_business_name
+            )
             if profile.fein:
-                fein_input = page.locator("input[id*='fein'], input[id*='tin']").first
-                await fein_input.fill(profile.fein)
-
-            # Phone
+                await page.locator("text=FEIN").locator("xpath=following::input[1]").fill(profile.fein)
             if profile.contact_phone:
-                phone_input = page.locator("input[id*='phone'], input[name*='phone']").first
-                await phone_input.fill(profile.contact_phone)
-
-            # Email
+                await page.locator("text=Phone Number").locator("xpath=following::input[1]").fill(profile.contact_phone)
             if profile.contact_email:
-                email_input = page.locator("input[id*='email'], input[name*='email']").first
-                await email_input.fill(profile.contact_email)
-
+                await page.locator("text=Email Address").locator("xpath=following::input[1]").fill(profile.contact_email)
         else:
-            # Individual mode (default)
             if profile.first_name:
-                await page.fill("input[id*='first'], input[name*='first']", profile.first_name)
+                await page.locator("text=First Name").locator("xpath=following::input[1]").fill(profile.first_name)
             if profile.last_name:
-                await page.fill("input[id*='last'], input[name*='last']", profile.last_name)
+                await page.locator("text=Last Name").locator("xpath=following::input[1]").fill(profile.last_name)
             if profile.date_of_birth:
                 dob_str = profile.date_of_birth.strftime("%m/%d/%Y")
-                dob_input = page.locator("input[id*='birth'], input[name*='birth']").first
-                await dob_input.fill(dob_str)
+                await page.locator("text=Date of Birth").locator("xpath=following::input[1]").fill(dob_str)
             if profile.contact_phone:
-                phone_input = page.locator("input[id*='phone'], input[name*='phone']").first
-                await phone_input.fill(profile.contact_phone)
+                await page.locator("text=Phone Number").locator("xpath=following::input[1]").fill(profile.contact_phone)
             if profile.contact_email:
-                email_input = page.locator("input[id*='email'], input[name*='email']").first
-                await email_input.fill(profile.contact_email)
+                await page.locator("text=Email Address").locator("xpath=following::input[1]").fill(profile.contact_email)
 
-        # Click Save & Continue
-        await page.click("button:has-text('Save & Continue')")
-        await page.wait_for_timeout(2000)
+        await page.locator("button:has-text('Save & Continue')").first.click()
+        await page.wait_for_timeout(NAV_SETTLE)
 
-        # Click Next to go to DBA(s)
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=DBA", timeout=10000)
+        await page.locator("button:has-text('Next')").first.click()
+        # Wait for unique DBA page content (not sidebar text)
+        await page.wait_for_selector("text=+ DBA", timeout=TIMEOUT)
 
     async def _fill_dba(self, page: Page, profile: ProspectProfile) -> None:
         """Policy > DBA(s) page."""
         print("[MMG] Filling DBA...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
         if profile.dba:
-            await page.click("button:has-text('DBA')")
-            await page.wait_for_timeout(1000)
-            dba_input = page.locator("input[id*='dba'], input[name*='dba']").first
-            await dba_input.fill(profile.dba)
-            await page.click("button:has-text('Save')")
-            await page.wait_for_timeout(1000)
+            await page.locator("button:has-text('DBA')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
+            # Input IDs are GUIDs — target by label proximity
+            await page.locator("text=DBA Name, text=DBA").locator("xpath=following::input[1]").first.fill(profile.dba)
+            await page.locator("button:has-text('Save')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
 
-        # Click Next to Mailing Address
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Mailing Address", timeout=10000)
+        await page.locator("button:has-text('Next')").first.click()
+        # Wait for unique Mailing Address page content
+        await page.wait_for_selector("text=Address Search", timeout=TIMEOUT)
 
     async def _fill_mailing_address(self, page: Page, profile: ProspectProfile) -> None:
         """Policy > Mailing Address page."""
         print("[MMG] Filling Mailing Address...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
         addr = profile.mailing_address
 
-        # Fill address fields directly (more reliable than autocomplete)
-        address_input = page.locator("input[id*='address'], input[name*='address']").first
-        await address_input.fill(addr.street)
+        # Use exact text match to avoid matching "Address Search"
+        await page.get_by_text("Address", exact=True).locator("xpath=following::input[1]").fill(addr.street)
+        await page.get_by_text("City", exact=True).locator("xpath=following::input[1]").fill(addr.city)
 
-        city_input = page.locator("input[id*='city'], input[name*='city']").first
-        await city_input.fill(addr.city)
-
-        # State dropdown
         if addr.state:
-            await page.select_option("select[id*='state'], select[name*='state']", label=addr.state)
+            # State is a native <select class="form-control"> with abbreviation values
+            await page.locator("select.form-control").first.select_option(value=addr.state)
 
-        zip_input = page.locator("input[id*='zip'], input[name*='zip']").first
-        await zip_input.fill(addr.zip_code)
+        await page.get_by_text("Zip Code", exact=True).locator("xpath=following::input[1]").fill(addr.zip_code)
 
-        # Click Next to Locations
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Location", timeout=10000)
+        # Tab off the Zip field so Angular fires its blur/change validation before we click Next
+        await page.keyboard.press("Tab")
+        await page.wait_for_timeout(1000)
+
+        await page.locator("button:has-text('Next')").first.click()
+
+        # After clicking Next the portal calls the USPS API (can take 10–30s).
+        # Poll until the Location list page is confirmed (Add Location button visible).
+        # Handle the USPS dialog if it appears along the way, then keep polling.
+        print("[MMG] Waiting for USPS validation or Location page...")
+        for _ in range(40):
+            await page.wait_for_timeout(2000)
+            if await page.locator("text=Specified Address").count() > 0:
+                await _handle_address_validation(page)
+                continue  # keep polling — USPS dialog close triggers navigation, need to wait for it
+            if await page.locator("button:has-text('Add Location')").count() > 0:
+                break
+            # Portal sometimes auto-opens the Add Location modal after navigation
+            if await page.locator("text=Same as Mailing Address").count() > 0:
+                print("[MMG] Add Location modal already open — skipping button click.")
+                break
+        else:
+            raise TimeoutError("[MMG] Timed out waiting for Location list after Mailing Address Next")
 
     async def _fill_location(self, page: Page, profile: ProspectProfile) -> None:
         """Locations section — add location and building."""
         print("[MMG] Filling Location...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Click Add Location
-        await page.click("button:has-text('Add Location')")
-        await page.wait_for_selector("text=Add Location", timeout=10000)
+        # Modal may already be open (portal auto-opens it after navigation)
+        if not await page.locator("text=Same as Mailing Address").is_visible():
+            await page.locator("button:has-text('Add Location')").first.click()
+            await page.locator("text=Same as Mailing Address").wait_for(state="visible", timeout=TIMEOUT)
+        await page.wait_for_load_state("networkidle", timeout=TIMEOUT)
 
-        # Check if same as mailing address
         if profile.mailing_is_primary_location:
-            toggle = page.locator("text=Same as Mailing Address").locator("..").locator("input, button, [role='switch']").first
-            await toggle.click()
+            # Click the "Same as Mailing Address" toggle label — Angular wires label click to the input
+            same_as = page.get_by_text("Same as Mailing Address", exact=True)
+            if await same_as.count() > 0:
+                await same_as.first.click()
+                await page.wait_for_timeout(500)
         else:
-            # Fill location address from first location or mailing address
             loc = profile.locations[0] if profile.locations else None
             addr = loc.address if loc else profile.mailing_address
 
-            address_input = page.locator("input[id*='address'], input[name*='address']").first
-            await address_input.fill(addr.street)
-
-            city_input = page.locator("input[id*='city'], input[name*='city']").first
-            await city_input.fill(addr.city)
+            await page.get_by_text("Address", exact=True).locator("xpath=following::input[1]").fill(addr.street)
+            await page.get_by_text("City", exact=True).locator("xpath=following::input[1]").fill(addr.city)
 
             if addr.state:
-                await page.select_option("select[id*='state'], select[name*='state']", label=addr.state)
+                await page.locator("select.form-control").first.select_option(value=addr.state)
 
-            zip_input = page.locator("input[id*='zip'], input[name*='zip']").first
-            await zip_input.fill(addr.zip_code)
+            await page.get_by_text("Zip Code", exact=True).locator("xpath=following::input[1]").fill(addr.zip_code)
 
         # Distance to Hydrant
         loc = profile.locations[0] if profile.locations else None
         if loc and loc.distance_to_hydrant:
-            await page.select_option("select", label=loc.distance_to_hydrant.value)
+            await choices_select(page, loc.distance_to_hydrant.value)
 
-        # Save & Continue
-        await page.click("button:has-text('Save & Continue')")
-        await page.wait_for_timeout(2000)
+        await page.locator("button:has-text('Save & Continue')").first.click()
 
-        # Now add Building/BPP
-        await page.click("button:has-text('Add Building/BPP')")
-        await page.wait_for_selector("text=Building Details", timeout=10000)
+        # Race: USPS dialog or "Add Building/BPP" button becoming visible
+        print("[MMG] Waiting for USPS validation or Building prompt...")
+        for _ in range(30):
+            await page.wait_for_timeout(2000)
+            if await page.locator("text=Specified Address").count() > 0:
+                await _handle_address_validation(page)
+                break
+            if await page.locator("button:has-text('Add Building/BPP')").count() > 0:
+                break
+
+        await page.locator("button:has-text('Add Building/BPP')").first.click()
+        await page.wait_for_selector("text=Building Details", timeout=TIMEOUT)
 
         await self._fill_building(page, profile)
 
-        # After building wizard, back on Locations page — click Next to Coverages
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Coverages", timeout=10000)
+        await page.locator("button:has-text('Next')").first.click()
+        # Wait for the Required Coverages page — Choices.js dropdown for liability limit is unique
+        await page.wait_for_selector(".choices__inner", timeout=TIMEOUT)
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
     async def _fill_building(self, page: Page, profile: ProspectProfile) -> None:
         """Building wizard — 5 steps inside the Location."""
         prop = profile.property
 
         # Step 1: Building Details
+        # All input IDs on agencyportal are GUIDs — must use label-proximity XPath throughout.
         print("[MMG] Filling Building Details (Step 1/5)...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
+
         if prop.building_description:
-            desc_input = page.locator("input[id*='description'], textarea[id*='description']").first
-            await desc_input.fill(prop.building_description)
+            try:
+                # Try input first, fall back to textarea
+                desc_label = page.locator("text=Description")
+                desc_input = desc_label.locator("xpath=following::input[1]")
+                desc_textarea = desc_label.locator("xpath=following::textarea[1]")
+                if await desc_input.count() > 0:
+                    await desc_input.first.fill(prop.building_description)
+                elif await desc_textarea.count() > 0:
+                    await desc_textarea.first.fill(prop.building_description)
+            except Exception:
+                print("[MMG] Building description field not found — skipping.")
 
         if prop.building_value:
-            limit_input = page.locator("input[id*='building'][id*='limit'], input[name*='building']").first
-            await limit_input.fill(str(int(prop.building_value)))
+            try:
+                await page.locator("text=Building Limit, text=Building Value, text=Building").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(int(prop.building_value)))
+            except Exception:
+                print("[MMG] Building value field not found — skipping.")
 
-        if prop.bpp_value:
-            bpp_input = page.locator("input[id*='personal'], input[name*='bpp']").first
-            await bpp_input.fill(str(int(prop.bpp_value)))
+        if prop.bpp_value and prop.bpp_value > 0:
+            try:
+                await page.locator("text=Business Personal Property, text=BPP").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(int(prop.bpp_value)))
+            except Exception:
+                print("[MMG] BPP field not found — skipping.")
 
         if prop.annual_gross_receipts:
-            receipts_input = page.locator("input[id*='receipt'], input[id*='gross']").first
-            await receipts_input.fill(str(int(prop.annual_gross_receipts)))
+            try:
+                await page.locator("text=Gross Receipts, text=Annual Gross, text=Receipts").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(int(prop.annual_gross_receipts)))
+            except Exception:
+                print("[MMG] Annual gross receipts field not found — skipping.")
 
         if prop.sprinklered:
-            sprinkler_checkbox = page.locator("text=Automatic Sprinkler").locator("..").locator("input[type='checkbox']").first
-            await sprinkler_checkbox.check()
+            try:
+                await page.locator("label:has-text('Automatic Sprinkler'), text=Automatic Sprinkler").first.click()
+            except Exception:
+                print("[MMG] Sprinkler checkbox not found — skipping.")
 
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Construction Details", timeout=10000)
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_selector("text=Construction Details", timeout=TIMEOUT)
 
         # Step 2: Construction Details
         print("[MMG] Filling Construction Details (Step 2/5)...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
+
         if prop.construction_type:
-            await page.select_option("select", label=prop.construction_type.value)
+            try:
+                await choices_select(page, prop.construction_type.value, nth=0)
+            except Exception:
+                print(f"[MMG] Construction type '{prop.construction_type.value}' not found — skipping.")
 
         if prop.occupied_by:
-            occupied_selects = page.locator("select")
-            count = await occupied_selects.count()
-            for i in range(count):
-                select = occupied_selects.nth(i)
-                options_text = await select.inner_text()
-                if "Owner" in options_text:
-                    await select.select_option(label=prop.occupied_by.value)
-                    break
+            try:
+                await choices_select(page, prop.occupied_by.value)
+            except Exception:
+                print(f"[MMG] Occupied by '{prop.occupied_by.value}' not found — skipping.")
 
         if prop.year_built:
-            year_input = page.locator("input[id*='constructed'], input[id*='year']").first
-            await year_input.fill(str(prop.year_built))
+            try:
+                await page.locator("text=Year Built, text=Year Constructed").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(prop.year_built))
+            except Exception:
+                print("[MMG] Year built field not found — skipping.")
 
         if prop.square_footage:
-            sqft_input = page.locator("input[id*='square'], input[id*='area']").first
-            await sqft_input.fill(str(prop.square_footage))
-
-        if prop.roof_year_updated:
-            roof_input = page.locator("input[id*='roof']").first
-            await roof_input.fill(str(prop.roof_year_updated))
+            try:
+                await page.locator("text=Square Footage, text=Square Feet, text=Area").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(prop.square_footage))
+            except Exception:
+                print("[MMG] Square footage field not found — skipping.")
 
         if prop.number_of_stories:
-            stories_input = page.locator("input[id*='stories'], input[id*='stor']").first
-            await stories_input.fill(str(prop.number_of_stories))
+            try:
+                await page.locator("text=Number of Stories, text=Stories").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(prop.number_of_stories))
+            except Exception:
+                print("[MMG] Number of stories field not found — skipping.")
 
-        # Electrical section
+        if prop.roof_year_updated:
+            try:
+                await page.locator("text=Roof Year, text=Year Roof").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(prop.roof_year_updated))
+            except Exception:
+                print("[MMG] Roof year field not found — skipping.")
+
         if prop.electrical_year_updated:
-            elec_year_input = page.locator("input[id*='electrical'][id*='year'], input[name*='electrical']").first
-            await elec_year_input.fill(str(prop.electrical_year_updated))
+            try:
+                await page.locator("text=Electrical Year, text=Year Electrical, text=Wiring Year").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(prop.electrical_year_updated))
+            except Exception:
+                print("[MMG] Electrical year field not found — skipping.")
 
-        # Plumbing section
         if prop.plumbing_year_updated:
-            plumb_input = page.locator("input[id*='plumbing']").first
-            await plumb_input.fill(str(prop.plumbing_year_updated))
+            try:
+                await page.locator("text=Plumbing Year, text=Year Plumbing").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(prop.plumbing_year_updated))
+            except Exception:
+                print("[MMG] Plumbing year field not found — skipping.")
 
-        # Heating section
         if prop.hvac_year_updated:
-            heat_input = page.locator("input[id*='heating'][id*='year']").first
-            await heat_input.fill(str(prop.hvac_year_updated))
+            try:
+                await page.locator("text=Heating Year, text=HVAC Year, text=Year Heating").locator(
+                    "xpath=following::input[1]"
+                ).first.fill(str(prop.hvac_year_updated))
+            except Exception:
+                print("[MMG] HVAC year field not found — skipping.")
 
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Building Classification", timeout=10000)
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_selector("text=Building Classification", timeout=TIMEOUT)
 
         # Step 3: Building Classification
         print("[MMG] Filling Building Classification (Step 3/5)...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
+
         if prop.business_owner_class:
-            await page.select_option("select", label=prop.business_owner_class)
+            try:
+                await choices_select(page, prop.business_owner_class)
+            except Exception:
+                print(f"[MMG] Business class '{prop.business_owner_class}' not found — skipping.")
 
-        # Checkboxes
-        if prop.fire_extinguishers:
-            await page.check("text=Fire Extinguishers")
-        if prop.smoke_detectors:
-            await page.check("text=Smoke Detectors")
-        if prop.security_cameras:
-            await page.check("text=Security Cameras")
+        # Safety checkboxes — click the label so Angular wires it correctly
+        for label_text, flag in [
+            ("Fire Extinguisher", prop.fire_extinguishers),
+            ("Smoke Detector", prop.smoke_detectors),
+            ("Security Camera", prop.security_cameras),
+        ]:
+            if flag:
+                try:
+                    await page.locator(f"label:has-text('{label_text}')").first.click()
+                except Exception:
+                    print(f"[MMG] '{label_text}' checkbox not found — skipping.")
 
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Mortgagee", timeout=10000)
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_selector("text=Mortgagee", timeout=TIMEOUT)
 
-        # Step 4: Mortgagee & Loss Payee — skip unless data provided
-        print("[MMG] Mortgagee & Loss Payee (Step 4/5) — skipping unless data provided...")
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Optional Coverages", timeout=10000)
+        # Step 4: Mortgagee & Loss Payee
+        print("[MMG] Mortgagee & Loss Payee (Step 4/5)...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
+
+        if profile.property.mortgagee_name and profile.property.mortgagee_name.lower() != "none":
+            try:
+                await page.locator("button:has-text('Add Mortgagee'), a:has-text('Add Mortgagee')").first.click()
+                await page.wait_for_timeout(NAV_SETTLE)
+                await page.locator("text=Mortgagee Name, text=Name").locator("xpath=following::input[1]").first.fill(
+                    profile.property.mortgagee_name
+                )
+                if profile.property.mortgagee_address:
+                    await page.locator("text=Address").locator("xpath=following::input[1]").first.fill(
+                        profile.property.mortgagee_address
+                    )
+                await page.locator("button:has-text('Save')").first.click()
+                await page.wait_for_timeout(NAV_SETTLE)
+            except Exception:
+                print("[MMG] Mortgagee entry failed — skipping.")
+
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_selector("text=Optional Coverages", timeout=TIMEOUT)
 
         # Step 5: Optional Coverages — leave at defaults
         print("[MMG] Optional Coverages (Step 5/5) — leaving at defaults...")
-        await page.click("button:has-text('Save & Continue')")
-        await page.wait_for_timeout(2000)
+        await page.locator("button:has-text('Save & Continue')").first.click()
+        await page.wait_for_timeout(NAV_SETTLE)
 
     async def _fill_coverages(self, page: Page, profile: ProspectProfile) -> None:
         """Coverages section — Required, Optional, Tools, Additional Insured, Credits."""
         print("[MMG] Filling Coverages...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Required coverages — set liability limit
+        # Required coverages — set liability limit via Choices.js
         gl_limit = MMG_LIABILITY_LIMITS_MAP.get(profile.gl.desired_limits, "$1,000,000")
-        liability_select = page.locator("select").first
-        await liability_select.select_option(label=gl_limit)
+        await choices_select(page, gl_limit)
 
-        # Click Next through remaining coverage sub-pages (leave at defaults)
+        # Click Next through remaining sub-pages at defaults
         for section_name in ["Optional", "Tools & Equipment", "Additional Insured", "Credits"]:
-            await page.click("button:has-text('Next')")
-            await page.wait_for_timeout(2000)
+            await page.locator("button:has-text('Next')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
             print(f"[MMG] Coverages > {section_name} — leaving at defaults...")
 
-        # After Credits, Next goes to Additional Info
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Additional Info", timeout=10000)
+        # Final Next goes to Additional Info
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_selector("text=Additional Info", timeout=TIMEOUT)
 
     async def _fill_additional_info(self, page: Page, profile: ProspectProfile) -> None:
         """Additional Info > Underwriting and Inspection Contact."""
         print("[MMG] Filling Additional Info > Underwriting...")
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Currently insured? (Yes/No buttons)
+        # Currently insured?
         if profile.currently_insured is True:
-            await page.click("button:has-text('Yes')")
-            await page.wait_for_timeout(1000)
-            # Conditional: Does your agency manage the policy?
+            await page.locator("button:has-text('Yes')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
+
             if profile.agency_manages_current_policy is not None:
                 answer = "Yes" if profile.agency_manages_current_policy else "No"
                 buttons = page.locator(f"button:has-text('{answer}')")
-                if await buttons.count() > 1:
-                    await buttons.nth(1).click()
-            # Current carrier dropdown
+                count = await buttons.count()
+                # Click the second one (first was "currently insured" answer)
+                await buttons.nth(min(1, count - 1)).click()
+                await page.wait_for_timeout(NAV_SETTLE)
+
             if profile.current_carrier:
-                await page.select_option("select", label=profile.current_carrier)
-            # Years in business
+                await choices_select(page, profile.current_carrier)
+
             if profile.years_in_business:
-                selects = page.locator("select")
-                count = await selects.count()
-                for i in range(count):
-                    s = selects.nth(i)
-                    text = await s.inner_text()
-                    if "years" in text.lower() or "10+" in text:
-                        await s.select_option(label=profile.years_in_business)
-                        break
-            # Continuous coverage
+                await choices_select(page, profile.years_in_business)
+
             if profile.continuous_coverage is not None:
                 answer = "Yes" if profile.continuous_coverage else "No"
-                await page.click(f"button:has-text('{answer}')")
-        elif profile.currently_insured is False:
-            await page.click("button:has-text('No')")
+                buttons = page.locator(f"button:has-text('{answer}')")
+                await buttons.last.click()
+                await page.wait_for_timeout(NAV_SETTLE)
 
-        # Cancellations/non-renewals
+        elif profile.currently_insured is False:
+            await page.locator("button:has-text('No')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
+
+        # Cancellations/non-renewals — click the relevant No/Yes
         if profile.non_renewals_or_cancellations is not None:
             answer = "No" if not profile.non_renewals_or_cancellations else "Yes"
-            await page.click(f"button:has-text('{answer}')")
+            await page.locator(f"button:has-text('{answer}')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
 
         # Felony
         if profile.convicted_of_felony is not None:
             answer = "No" if not profile.convicted_of_felony else "Yes"
-            await page.click(f"button:has-text('{answer}')")
+            await page.locator(f"button:has-text('{answer}')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
 
         # Bankruptcy
         if profile.filed_bankruptcy is not None:
             answer = "No" if not profile.filed_bankruptcy else "Yes"
-            await page.click(f"button:has-text('{answer}')")
+            await page.locator(f"button:has-text('{answer}')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
 
         # Operations description
         if profile.operations_description:
-            textarea = page.locator("textarea").first
-            await textarea.fill(profile.operations_description)
+            await page.locator("textarea").first.fill(profile.operations_description)
 
         # Other businesses
         if profile.operates_other_businesses is not None:
             answer = "No" if not profile.operates_other_businesses else "Yes"
-            await page.click(f"button:has-text('{answer}')")
+            await page.locator(f"button:has-text('{answer}')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
 
         # Losses past 3 years
         if profile.losses_past_3_years is not None:
             answer = "No" if not profile.losses_past_3_years else "Yes"
-            await page.click(f"button:has-text('{answer}')")
+            await page.locator(f"button:has-text('{answer}')").first.click()
+            await page.wait_for_timeout(NAV_SETTLE)
 
-        # Click Next to Inspection Contact
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Inspection Contact", timeout=10000)
+        # Next → Inspection Contact
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_selector("text=Inspection Contact", timeout=TIMEOUT)
+        await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Inspection Contact — just select the first contact card
+        # Select the first contact card
         print("[MMG] Selecting Inspection Contact...")
         contact_card = page.locator("[class*='contact'], [class*='card']").first
         if await contact_card.count() > 0:
             await contact_card.click()
+            await page.wait_for_timeout(NAV_SETTLE)
 
-        # Click Next to Summary
-        await page.click("button:has-text('Next')")
-        await page.wait_for_selector("text=Summary", timeout=10000)
+        # Next → Summary
+        await page.locator("button:has-text('Next')").first.click()
+        await page.wait_for_selector("text=Summary", timeout=TIMEOUT)
         print("[MMG] Reached Summary page. Quote form is complete.")
