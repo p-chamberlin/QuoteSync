@@ -323,42 +323,99 @@ class MMGBopAdapter(CarrierAdapter):
             await page.locator("text=Same as Mailing Address").wait_for(state="visible", timeout=TIMEOUT)
         await page.wait_for_load_state("networkidle", timeout=TIMEOUT)
 
-        if profile.mailing_is_primary_location:
-            # Click the "Same as Mailing Address" toggle label — Angular wires label click to the input
-            same_as = page.get_by_text("Same as Mailing Address", exact=True)
-            if await same_as.count() > 0:
-                await same_as.first.click()
-                await page.wait_for_timeout(500)
-        else:
-            loc = profile.locations[0] if profile.locations else None
-            addr = loc.address if loc else profile.mailing_address
-
-            await page.get_by_text("Address", exact=True).locator("xpath=following::input[1]").fill(addr.street)
-            await page.get_by_text("City", exact=True).locator("xpath=following::input[1]").fill(addr.city)
-
-            if addr.state:
-                await page.locator("select.form-control").first.select_option(value=addr.state)
-
-            await page.get_by_text("Zip Code", exact=True).locator("xpath=following::input[1]").fill(addr.zip_code)
-
-        # Distance to Hydrant
+        # Determine which address to use for the location
         loc = profile.locations[0] if profile.locations else None
-        if loc and loc.distance_to_hydrant:
-            await choices_select(page, loc.distance_to_hydrant.value)
+        addr = profile.mailing_address if profile.mailing_is_primary_location else (
+            loc.address if loc else profile.mailing_address
+        )
+
+        if profile.mailing_is_primary_location:
+            # Try the "Same as Mailing Address" Angular Material toggle via JS (label click is unreliable)
+            await page.evaluate("""
+                () => {
+                    const btn = document.querySelector('[role="switch"]');
+                    if (btn) { btn.click(); return; }
+                    const cb = document.querySelector('mat-slide-toggle input[type="checkbox"]');
+                    if (cb) { cb.click(); return; }
+                    const bar = document.querySelector('.mat-slide-toggle-bar, .mdc-switch__track');
+                    if (bar) { bar.click(); return; }
+                }
+            """)
+            await page.wait_for_timeout(1000)
+
+        # Fill the modal address form using Tab-based keyboard navigation.
+        # This avoids ambiguous DOM selectors caused by the background page having identical labels.
+        # Modal field order: Address Search → Address → Suite → City → State → Zip → Distance to Hydrant
+
+        # Click into the Address field (last matching input = modal's, since modal is added after background)
+        all_address_inputs = page.get_by_text("Address", exact=True).locator("xpath=following::input[1]")
+        addr_count = await all_address_inputs.count()
+        address_field = all_address_inputs.nth(addr_count - 1) if addr_count > 0 else all_address_inputs.first
+        await address_field.click()
+        await address_field.fill(addr.street)
+
+        await page.keyboard.press("Tab")  # → Suite, Apt, Unit (skip)
+        await page.keyboard.press("Tab")  # → City
+        await page.keyboard.type(addr.city)
+
+        await page.keyboard.press("Tab")  # → State select
+        await page.wait_for_timeout(300)
+        # "text=State" matches "Address Validation Status" in the background — use exact match
+        # and nth(count-1) to target the modal's State label (same pattern that works for Address/City).
+        all_state_labels = page.get_by_text("State", exact=True)
+        state_label_count = await all_state_labels.count()
+        await all_state_labels.nth(state_label_count - 1).locator(
+            "xpath=following::select[1]"
+        ).select_option(value=addr.state)
+        await page.wait_for_timeout(300)
+
+        # Zip Code: find the empty required text input that follows the State select.
+        # Background Zip is already filled so it won't have placeholder="(Required)".
+        # The modal Zip is still empty, so placeholder is still "(Required)".
+        zip_field = page.locator("input[placeholder='(Required)'][type='text']").last
+        await zip_field.fill(addr.zip_code)
+        await page.keyboard.press("Tab")  # blur Zip to trigger validation
+
+        await page.wait_for_timeout(500)
+
+        # Distance to Hydrant — required native <select> below Zip Code in the modal
+        # Use the select that follows the "Distance to Hydrant" label text
+        try:
+            dist_select = page.locator("text=Distance to Hydrant (Ft)").locator("xpath=following::select[1]")
+            if await dist_select.count() == 0:
+                dist_select = page.locator("text=Distance to Hydrant").locator("xpath=following::select[1]")
+            if await dist_select.count() > 0:
+                if loc and loc.distance_to_hydrant:
+                    await dist_select.select_option(label=loc.distance_to_hydrant.value)
+                else:
+                    await dist_select.select_option(value="1 to 1,000 Ft")
+                print("[MMG] Distance to Hydrant set.")
+            else:
+                print("[MMG] Distance to Hydrant dropdown not found — skipping.")
+        except Exception as e:
+            print(f"[MMG] Distance to Hydrant error: {e}")
 
         await page.locator("button:has-text('Save & Continue')").first.click()
 
-        # Race: USPS dialog or "Add Building/BPP" button becoming visible
+        # Race: USPS dialog or "Add Building" button becoming visible after location save
         print("[MMG] Waiting for USPS validation or Building prompt...")
-        for _ in range(30):
+        for i in range(40):
             await page.wait_for_timeout(2000)
             if await page.locator("text=Specified Address").count() > 0:
                 await _handle_address_validation(page)
+                continue
+            if await page.locator("button:has-text('Add Building')").count() > 0:
                 break
-            if await page.locator("button:has-text('Add Building/BPP')").count() > 0:
+            # If "This field is required" is still showing, the form didn't save — log and stop retrying
+            if await page.locator("text=This field is required").count() > 0:
+                print(f"[MMG] Location form has validation errors at poll {i} — check Distance to Hydrant")
                 break
+            if i % 5 == 0:
+                print(f"[MMG] Still waiting for Building button... ({i*2}s elapsed)")
+        else:
+            raise TimeoutError("[MMG] Timed out waiting for Add Building/BPP after location save")
 
-        await page.locator("button:has-text('Add Building/BPP')").first.click()
+        await page.locator("button:has-text('Add Building')").first.click()
         await page.wait_for_selector("text=Building Details", timeout=TIMEOUT)
 
         await self._fill_building(page, profile)
