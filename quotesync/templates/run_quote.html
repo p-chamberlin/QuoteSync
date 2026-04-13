@@ -39,6 +39,18 @@
             {% endfor %}
         </div>
         <p class="hint">Configure credentials in <code>.env</code> to enable carriers.</p>
+        <div class="session-actions">
+            {% for c in carriers %}
+            {% if c.configured and c.has_session %}
+            <form method="POST" action="{{ url_for('clear_session', carrier_id=c.id) }}" class="inline-form">
+                <button type="submit" class="btn btn-sm btn-warning"
+                        title="Force a fresh login next run (use if MFA expired)">
+                    Clear saved session: {{ c.name }}
+                </button>
+            </form>
+            {% endif %}
+            {% endfor %}
+        </div>
     </fieldset>
 
     <div class="form-actions">

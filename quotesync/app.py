@@ -15,7 +15,7 @@ from pathlib import Path
 from flask import Flask, flash, redirect, render_template, request, url_for
 
 from quotesync.config import get_carrier_list, load_adapter
-from quotesync.engine import run_carrier, load_profile
+from quotesync.engine import run_carrier, load_profile, _session_path
 from quotesync.models.prospect import ProspectProfile
 
 logger = logging.getLogger(__name__)
@@ -173,6 +173,22 @@ def run_quote_start():
 def run_quote_clear(run_id):
     """Clear a completed/errored run from the status list."""
     _quote_runs.pop(run_id, None)
+    return redirect(url_for("run_quote_select"))
+
+
+@app.route("/session/<carrier_id>/clear", methods=["POST"])
+def clear_session(carrier_id):
+    """Delete the saved browser session for a carrier, forcing a fresh login next run."""
+    try:
+        adapter = load_adapter(carrier_id)
+        session_file = _session_path(adapter)
+        if session_file.exists():
+            session_file.unlink()
+            flash(f"Saved session cleared for {adapter.name}. Next run will require login.", "success")
+        else:
+            flash("No saved session found.", "info")
+    except Exception as e:
+        flash(f"Error clearing session: {e}", "error")
     return redirect(url_for("run_quote_select"))
 
 
