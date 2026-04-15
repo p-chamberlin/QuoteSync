@@ -78,6 +78,46 @@ async def _handle_address_validation(page) -> None:
         print(f"[MMG] Warning: USPS dialog handling had an issue: {e}")
 
 
+async def construction_select(page, value: str) -> None:
+    """Select a Construction type from MMG's custom searchable dropdown.
+
+    The trigger is a readonly input whose id ends with '_selectedInput'.
+    Clicking it opens a search box (class='dropdown-search-input').
+    We type the value to filter, then click the first matching option.
+    """
+    # The Construction trigger is a readonly input with id ending in _selectedInput.
+    # It's the first such input inside the Construction Details step.
+    trigger = page.locator("input[readonly][id$='_selectedInput']").last
+    await trigger.click()
+
+    await page.wait_for_selector(".dropdown-search-input", state="visible", timeout=10000)
+    search = page.locator(".dropdown-search-input").last
+    await search.fill(value)
+    await page.wait_for_timeout(600)
+
+    # Click the first visible option that contains our value text (case-insensitive)
+    options = page.locator("li, .dropdown-list-item, .dropdown-item, [role='option']")
+    count = await options.count()
+    available = []
+    for i in range(count):
+        opt = options.nth(i)
+        if not await opt.is_visible():
+            continue
+        text = (await opt.inner_text()).strip()
+        available.append(text)
+        if value.lower() in text.lower():
+            await opt.click()
+            await page.wait_for_timeout(400)
+            return
+
+    # Close and report available options so we can fix the mapping
+    await search.press("Escape")
+    raise ValueError(
+        f"construction_select: option '{value}' not found. "
+        f"Available options: {available}"
+    )
+
+
 async def choices_select(page, label: str, nth: int = -1) -> None:
     """Select an option in a Choices.js dropdown by its label text.
 
@@ -94,14 +134,21 @@ async def choices_select(page, label: str, nth: int = -1) -> None:
     await page.wait_for_selector(".choices.is-open .choices__item--selectable", timeout=TIMEOUT)
     options = page.locator(".choices.is-open .choices__item--selectable")
     opt_count = await options.count()
+    available = []
     for i in range(opt_count):
         opt = options.nth(i)
         text = (await opt.inner_text()).strip()
+        available.append(text)
         if label.lower() in text.lower():
             await opt.click()
             await page.wait_for_timeout(500)
             return
-    raise ValueError(f"choices_select: option '{label}' not found in open Choices.js dropdown")
+    # Close the open dropdown before raising
+    await page.keyboard.press("Escape")
+    await page.wait_for_timeout(300)
+    raise ValueError(
+        f"choices_select: option '{label}' not found. Available options: {available}"
+    )
 
 
 class MMGBopAdapter(CarrierAdapter):
@@ -132,8 +179,15 @@ class MMGBopAdapter(CarrierAdapter):
 
     async def navigate_to_new_quote(self, page: Page) -> None:
         """Navigate from dashboard to start a new BOP quote."""
-        await page.goto("https://connect.mmgins.com/rating/quotes")
-        await page.wait_for_load_state("load", timeout=TIMEOUT)
+        # connect.mmgins.com is an Angular SPA whose server redirects all sub-routes to /.
+        # Chrome marks the original navigation as ERR_ABORTED even though the app loads fine.
+        # Swallow that specific error and wait for the actual page content instead.
+        try:
+            await page.goto("https://connect.mmgins.com/rating/quotes", wait_until="domcontentloaded")
+        except Exception as e:
+            if "ERR_ABORTED" not in str(e):
+                raise
+        await page.wait_for_load_state("networkidle", timeout=TIMEOUT)
 
         # Wait for Angular form to render
         await page.wait_for_selector("text=Line of Business", timeout=TIMEOUT)
@@ -343,38 +397,41 @@ class MMGBopAdapter(CarrierAdapter):
             """)
             await page.wait_for_timeout(1000)
 
-        # Fill the modal address form using Tab-based keyboard navigation.
-        # This avoids ambiguous DOM selectors caused by the background page having identical labels.
-        # Modal field order: Address Search → Address → Suite → City → State → Zip → Distance to Hydrant
+        # Fill the modal address form using direct locators for each field.
+        # Modal field order: Address → Suite → City → State → Zip → Distance to Hydrant
+        # The modal is appended last in the DOM, so .last / .nth(-1) targets modal fields
+        # over identical background-page fields.
 
-        # Click into the Address field (last matching input = modal's, since modal is added after background)
+        # Address — last input following an "Address" label
         all_address_inputs = page.get_by_text("Address", exact=True).locator("xpath=following::input[1]")
         addr_count = await all_address_inputs.count()
         address_field = all_address_inputs.nth(addr_count - 1) if addr_count > 0 else all_address_inputs.first
         await address_field.click()
         await address_field.fill(addr.street)
-
-        await page.keyboard.press("Tab")  # → Suite, Apt, Unit (skip)
-        await page.keyboard.press("Tab")  # → City
-        await page.keyboard.type(addr.city)
-
-        await page.keyboard.press("Tab")  # → State select
-        await page.wait_for_timeout(300)
-        # "text=State" matches "Address Validation Status" in the background — use exact match
-        # and nth(count-1) to target the modal's State label (same pattern that works for Address/City).
-        all_state_labels = page.get_by_text("State", exact=True)
-        state_label_count = await all_state_labels.count()
-        await all_state_labels.nth(state_label_count - 1).locator(
-            "xpath=following::select[1]"
-        ).select_option(value=addr.state)
         await page.wait_for_timeout(300)
 
-        # Zip Code: find the empty required text input that follows the State select.
-        # Background Zip is already filled so it won't have placeholder="(Required)".
-        # The modal Zip is still empty, so placeholder is still "(Required)".
-        zip_field = page.locator("input[placeholder='(Required)'][type='text']").last
+        # City — maxlength="255" distinguishes it from Zip (maxlength="10").
+        # Address also has maxlength="255" but gets class "input-valid" after fill,
+        # so .last among unfilled (Required) 255-char inputs = modal City field.
+        city_field = page.locator("input[placeholder='(Required)'][maxlength='255']").last
+        await city_field.click()
+        await city_field.fill(addr.city)
+        await city_field.press("Tab")
+        await page.wait_for_timeout(300)
+
+        # State — real click first so Angular registers focus, then select_option sets
+        # the DOM value and fires Playwright's change event.
+        # State select has maxlength="255"; Distance to Hydrant has maxlength="4000" — use
+        # maxlength to distinguish them since both share the select-placeholder class.
+        state_select = page.locator("select.select-placeholder[maxlength='255']").last
+        await state_select.click()
+        await state_select.select_option(value=addr.state)
+        await page.wait_for_timeout(500)
+
+        # Zip — maxlength="10" uniquely identifies it among (Required) text inputs.
+        zip_field = page.locator("input[placeholder='(Required)'][maxlength='10']").last
         await zip_field.fill(addr.zip_code)
-        await page.keyboard.press("Tab")  # blur Zip to trigger validation
+        await zip_field.press("Tab")
 
         await page.wait_for_timeout(500)
 
@@ -385,6 +442,7 @@ class MMGBopAdapter(CarrierAdapter):
             if await dist_select.count() == 0:
                 dist_select = page.locator("text=Distance to Hydrant").locator("xpath=following::select[1]")
             if await dist_select.count() > 0:
+                await dist_select.click()
                 if loc and loc.distance_to_hydrant:
                     await dist_select.select_option(label=loc.distance_to_hydrant.value)
                 else:
@@ -420,7 +478,9 @@ class MMGBopAdapter(CarrierAdapter):
 
         await self._fill_building(page, profile)
 
-        await page.locator("button:has-text('Next')").first.click()
+        # After the building wizard closes we're back on the Locations page.
+        # Use .last — the background page may have a hidden Next button earlier in the DOM.
+        await page.locator("button:has-text('Next')").last.click()
         # Wait for the Required Coverages page — Choices.js dropdown for liability limit is unique
         await page.wait_for_selector(".choices__inner", timeout=TIMEOUT)
         await page.wait_for_load_state("load", timeout=TIMEOUT)
@@ -436,8 +496,7 @@ class MMGBopAdapter(CarrierAdapter):
 
         if prop.building_description:
             try:
-                # Try input first, fall back to textarea
-                desc_label = page.locator("text=Description")
+                desc_label = page.locator("text=Building Description")
                 desc_input = desc_label.locator("xpath=following::input[1]")
                 desc_textarea = desc_label.locator("xpath=following::textarea[1]")
                 if await desc_input.count() > 0:
@@ -449,7 +508,7 @@ class MMGBopAdapter(CarrierAdapter):
 
         if prop.building_value:
             try:
-                await page.locator("text=Building Limit, text=Building Value, text=Building").locator(
+                await page.locator("text=Building Limit").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(int(prop.building_value)))
             except Exception:
@@ -457,7 +516,7 @@ class MMGBopAdapter(CarrierAdapter):
 
         if prop.bpp_value and prop.bpp_value > 0:
             try:
-                await page.locator("text=Business Personal Property, text=BPP").locator(
+                await page.locator("text=Business Personal Property Limit").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(int(prop.bpp_value)))
             except Exception:
@@ -465,7 +524,7 @@ class MMGBopAdapter(CarrierAdapter):
 
         if prop.annual_gross_receipts:
             try:
-                await page.locator("text=Gross Receipts, text=Annual Gross, text=Receipts").locator(
+                await page.locator("text=Annual Gross Receipts").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(int(prop.annual_gross_receipts)))
             except Exception:
@@ -473,11 +532,12 @@ class MMGBopAdapter(CarrierAdapter):
 
         if prop.sprinklered:
             try:
-                await page.locator("label:has-text('Automatic Sprinkler'), text=Automatic Sprinkler").first.click()
+                await page.locator("label:has-text('Automatic Sprinkler System')").first.click()
             except Exception:
                 print("[MMG] Sprinkler checkbox not found — skipping.")
 
-        await page.locator("button:has-text('Next')").first.click()
+        # The modal's Next button is last in the DOM; .first hits the background page's hidden one
+        await page.locator("button:has-text('Next')").last.click()
         await page.wait_for_selector("text=Construction Details", timeout=TIMEOUT)
 
         # Step 2: Construction Details
@@ -486,35 +546,42 @@ class MMGBopAdapter(CarrierAdapter):
 
         if prop.construction_type:
             try:
-                await choices_select(page, prop.construction_type.value, nth=0)
-            except Exception:
-                print(f"[MMG] Construction type '{prop.construction_type.value}' not found — skipping.")
+                await construction_select(page, prop.construction_type.value)
+                print(f"[MMG] Construction type set to '{prop.construction_type.value}'.")
+            except Exception as e:
+                print(f"[MMG] Construction type error: {e}")
 
         if prop.occupied_by:
             try:
-                await choices_select(page, prop.occupied_by.value)
-            except Exception:
-                print(f"[MMG] Occupied by '{prop.occupied_by.value}' not found — skipping.")
+                # Occupied By is a native <select> with value="O" (Owner) or "N" (Non-owner)
+                _occupied_by_map = {"Owner Occupied": "O", "Non owner": "N"}
+                select_val = _occupied_by_map.get(prop.occupied_by.value, "O")
+                occ_select = page.locator("text=Occupied By").locator("xpath=following::select[1]")
+                await occ_select.click()
+                await occ_select.select_option(value=select_val)
+                print(f"[MMG] Occupied By set to '{prop.occupied_by.value}' (value='{select_val}').")
+            except Exception as e:
+                print(f"[MMG] Occupied By error: {e}")
 
         if prop.year_built:
             try:
-                await page.locator("text=Year Built, text=Year Constructed").locator(
+                await page.locator("text=Year Constructed").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(prop.year_built))
             except Exception:
-                print("[MMG] Year built field not found — skipping.")
+                print("[MMG] Year Constructed field not found — skipping.")
 
         if prop.square_footage:
             try:
-                await page.locator("text=Square Footage, text=Square Feet, text=Area").locator(
+                await page.locator("text=Area Square Feet").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(prop.square_footage))
             except Exception:
-                print("[MMG] Square footage field not found — skipping.")
+                print("[MMG] Area Square Feet field not found — skipping.")
 
         if prop.number_of_stories:
             try:
-                await page.locator("text=Number of Stories, text=Stories").locator(
+                await page.locator("text=Number of Stories").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(prop.number_of_stories))
             except Exception:
@@ -522,37 +589,37 @@ class MMGBopAdapter(CarrierAdapter):
 
         if prop.roof_year_updated:
             try:
-                await page.locator("text=Roof Year, text=Year Roof").locator(
+                await page.locator("text=Roof (Year)").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(prop.roof_year_updated))
             except Exception:
-                print("[MMG] Roof year field not found — skipping.")
+                print("[MMG] Roof (Year) field not found — skipping.")
 
         if prop.electrical_year_updated:
             try:
-                await page.locator("text=Electrical Year, text=Year Electrical, text=Wiring Year").locator(
+                await page.locator("text=Electrical (Year)").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(prop.electrical_year_updated))
             except Exception:
-                print("[MMG] Electrical year field not found — skipping.")
+                print("[MMG] Electrical (Year) field not found — skipping.")
 
         if prop.plumbing_year_updated:
             try:
-                await page.locator("text=Plumbing Year, text=Year Plumbing").locator(
+                await page.locator("text=Plumbing (Year)").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(prop.plumbing_year_updated))
             except Exception:
-                print("[MMG] Plumbing year field not found — skipping.")
+                print("[MMG] Plumbing (Year) field not found — skipping.")
 
         if prop.hvac_year_updated:
             try:
-                await page.locator("text=Heating Year, text=HVAC Year, text=Year Heating").locator(
+                await page.locator("text=Heating (Year)").locator(
                     "xpath=following::input[1]"
                 ).first.fill(str(prop.hvac_year_updated))
             except Exception:
-                print("[MMG] HVAC year field not found — skipping.")
+                print("[MMG] Heating (Year) field not found — skipping.")
 
-        await page.locator("button:has-text('Next')").first.click()
+        await page.locator("button:has-text('Next')").last.click()
         await page.wait_for_selector("text=Building Classification", timeout=TIMEOUT)
 
         # Step 3: Building Classification
@@ -577,7 +644,7 @@ class MMGBopAdapter(CarrierAdapter):
                 except Exception:
                     print(f"[MMG] '{label_text}' checkbox not found — skipping.")
 
-        await page.locator("button:has-text('Next')").first.click()
+        await page.locator("button:has-text('Next')").last.click()
         await page.wait_for_selector("text=Mortgagee", timeout=TIMEOUT)
 
         # Step 4: Mortgagee & Loss Payee
@@ -600,12 +667,13 @@ class MMGBopAdapter(CarrierAdapter):
             except Exception:
                 print("[MMG] Mortgagee entry failed — skipping.")
 
-        await page.locator("button:has-text('Next')").first.click()
+        await page.locator("button:has-text('Next')").last.click()
         await page.wait_for_selector("text=Optional Coverages", timeout=TIMEOUT)
 
-        # Step 5: Optional Coverages — leave at defaults
+        # Step 5: Optional Coverages — leave at defaults, then save the building
         print("[MMG] Optional Coverages (Step 5/5) — leaving at defaults...")
-        await page.locator("button:has-text('Save & Continue')").first.click()
+        # The last step uses "Next" to save the building (no "Save & Continue" in this modal)
+        await page.locator("button:has-text('Next')").last.click()
         await page.wait_for_timeout(NAV_SETTLE)
 
     async def _fill_coverages(self, page: Page, profile: ProspectProfile) -> None:
@@ -619,12 +687,12 @@ class MMGBopAdapter(CarrierAdapter):
 
         # Click Next through remaining sub-pages at defaults
         for section_name in ["Optional", "Tools & Equipment", "Additional Insured", "Credits"]:
-            await page.locator("button:has-text('Next')").first.click()
+            await page.locator("button:has-text('Next')").last.click()
             await page.wait_for_timeout(NAV_SETTLE)
             print(f"[MMG] Coverages > {section_name} — leaving at defaults...")
 
         # Final Next goes to Additional Info
-        await page.locator("button:has-text('Next')").first.click()
+        await page.locator("button:has-text('Next')").last.click()
         await page.wait_for_selector("text=Additional Info", timeout=TIMEOUT)
 
     async def _fill_additional_info(self, page: Page, profile: ProspectProfile) -> None:
