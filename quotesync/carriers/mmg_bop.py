@@ -50,11 +50,11 @@ MMG_ENTITY_MAP = {
     "Trust or Estate": "Trust or Estate",
 }
 
-# Maps our GL limits to the MMG dropdown values
+# Maps our GL limits to the MMG native <select> option values
 MMG_LIABILITY_LIMITS_MAP = {
-    "500K/1M": "$500,000",
-    "1M/2M": "$1,000,000",
-    "2M/4M": "$2,000,000",
+    "500K/1M": "500000",
+    "1M/2M": "1000000",
+    "2M/4M": "2000000",
 }
 
 TIMEOUT = 30000  # ms — consistent timeout for all waits
@@ -81,41 +81,64 @@ async def _handle_address_validation(page) -> None:
 async def construction_select(page, value: str) -> None:
     """Select a Construction type from MMG's custom searchable dropdown.
 
-    The trigger is a readonly input whose id ends with '_selectedInput'.
-    Clicking it opens a search box (class='dropdown-search-input').
-    We type the value to filter, then click the first matching option.
+    The trigger is a readonly input (id ends with '_selectedInput') that follows
+    the 'Construction' label. Clicking it opens a search box. We type to filter,
+    then press Enter to confirm the first (and only) filtered result.
     """
-    # The Construction trigger is a readonly input with id ending in _selectedInput.
-    # It's the first such input inside the Construction Details step.
-    trigger = page.locator("input[readonly][id$='_selectedInput']").last
+    # Use exact=True so we match the "Construction" label only, not "Construction Details"
+    # in the sidebar. Then find the first readonly _selectedInput after that label.
+    trigger = page.get_by_text("Construction", exact=True).locator(
+        "xpath=following::input[@readonly][1]"
+    )
     await trigger.click()
 
     await page.wait_for_selector(".dropdown-search-input", state="visible", timeout=10000)
-    search = page.locator(".dropdown-search-input").last
-    await search.fill(value)
-    await page.wait_for_timeout(600)
+    # Click the search input to ensure focus, then type character by character
+    search = page.locator(".dropdown-search-input").first
+    await search.click()
+    await page.keyboard.type(value, delay=80)
+    await page.wait_for_timeout(500)
 
-    # Click the first visible option that contains our value text (case-insensitive)
-    options = page.locator("li, .dropdown-list-item, .dropdown-item, [role='option']")
-    count = await options.count()
-    available = []
-    for i in range(count):
-        opt = options.nth(i)
-        if not await opt.is_visible():
-            continue
-        text = (await opt.inner_text()).strip()
-        available.append(text)
-        if value.lower() in text.lower():
-            await opt.click()
-            await page.wait_for_timeout(400)
-            return
+    # Use page.keyboard.press — fires to the focused element without holding a
+    # reference to the search input, which Angular may re-render mid-type.
+    await page.keyboard.press("Enter")
+    await page.wait_for_timeout(500)
 
-    # Close and report available options so we can fix the mapping
-    await search.press("Escape")
-    raise ValueError(
-        f"construction_select: option '{value}' not found. "
-        f"Available options: {available}"
-    )
+    # Verify something was selected (trigger input should no longer show placeholder)
+    selected_val = await trigger.input_value()
+    if selected_val and selected_val.strip():
+        print(f"[MMG] Construction selected: '{selected_val}'")
+        return
+
+    # Fallback: JS click on the first visible leaf element matching the value
+    # within the dropdown panel (sibling of the search input)
+    clicked = await page.evaluate("""
+        (val) => {
+            const input = document.querySelector('.dropdown-search-input');
+            if (!input) return 'no-input';
+            let container = input.parentElement;
+            for (let i = 0; i < 6; i++) {
+                if (!container) break;
+                const leaves = Array.from(container.querySelectorAll('*')).filter(
+                    el => el.children.length === 0
+                        && el.offsetParent !== null
+                        && el.textContent.trim().toLowerCase().includes(val.toLowerCase())
+                );
+                if (leaves.length) {
+                    leaves[0].click();
+                    return 'js-clicked:' + leaves[0].textContent.trim();
+                }
+                container = container.parentElement;
+            }
+            return 'not-found';
+        }
+    """, value)
+    print(f"[MMG] Construction JS fallback: {clicked}")
+    await page.wait_for_timeout(400)
+
+    selected_val = await trigger.input_value()
+    if not selected_val or not selected_val.strip():
+        raise ValueError(f"construction_select: '{value}' not selected (trigger still empty).")
 
 
 async def choices_select(page, label: str, nth: int = -1) -> None:
@@ -222,7 +245,11 @@ class MMGBopAdapter(CarrierAdapter):
         await self._fill_mailing_address(page, profile)
         await self._fill_location(page, profile)
         await self._fill_coverages(page, profile)
-        await self._fill_additional_info(page, profile)
+        # Additional Info is optional — some portal flows skip straight to Summary
+        if await page.locator("text=Underwriting, text=Additional Info").count() > 0:
+            await self._fill_additional_info(page, profile)
+        else:
+            print("[MMG] No Additional Info section found — skipping to Summary.")
         print("[MMG] Quote form filled. Review the Summary and Billing pages manually.")
 
     # --- Page-by-page fill methods ---
@@ -481,9 +508,9 @@ class MMGBopAdapter(CarrierAdapter):
         # After the building wizard closes we're back on the Locations page.
         # Use .last — the background page may have a hidden Next button earlier in the DOM.
         await page.locator("button:has-text('Next')").last.click()
-        # Wait for the Required Coverages page — Choices.js dropdown for liability limit is unique
-        await page.wait_for_selector(".choices__inner", timeout=TIMEOUT)
-        await page.wait_for_load_state("load", timeout=TIMEOUT)
+        # Wait for the Coverages section to load
+        await page.wait_for_load_state("networkidle", timeout=TIMEOUT)
+        print("[MMG] Navigated to Coverages section.")
 
     async def _fill_building(self, page: Page, profile: ProspectProfile) -> None:
         """Building wizard — 5 steps inside the Location."""
@@ -668,22 +695,31 @@ class MMGBopAdapter(CarrierAdapter):
                 print("[MMG] Mortgagee entry failed — skipping.")
 
         await page.locator("button:has-text('Next')").last.click()
-        await page.wait_for_selector("text=Optional Coverages", timeout=TIMEOUT)
+        # Wait for the Save & Continue button — it only appears on Step 5 (Optional Coverages).
+        # "text=Optional Coverages" matches the sidebar and fires too early.
+        await page.wait_for_selector("button:has-text('Save & Continue')", timeout=TIMEOUT)
 
-        # Step 5: Optional Coverages — leave at defaults, then save the building
+        # Step 5: Optional Coverages — the final button is "Save & Continue" (not "Next")
         print("[MMG] Optional Coverages (Step 5/5) — leaving at defaults...")
-        # The last step uses "Next" to save the building (no "Save & Continue" in this modal)
-        await page.locator("button:has-text('Next')").last.click()
-        await page.wait_for_timeout(NAV_SETTLE)
+        await page.locator("button:has-text('Save & Continue')").last.click()
+        # Wait for the loading overlay to clear and the modal to close
+        await page.wait_for_selector("button:has-text('Add Building')", timeout=TIMEOUT)
+        print("[MMG] Building saved — returned to Locations page.")
 
     async def _fill_coverages(self, page: Page, profile: ProspectProfile) -> None:
         """Coverages section — Required, Optional, Tools, Additional Insured, Credits."""
         print("[MMG] Filling Coverages...")
         await page.wait_for_load_state("load", timeout=TIMEOUT)
 
-        # Required coverages — set liability limit via Choices.js
-        gl_limit = MMG_LIABILITY_LIMITS_MAP.get(profile.gl.desired_limits, "$1,000,000")
-        await choices_select(page, gl_limit)
+        # Required coverages — Liability & Medical Expenses is a native <select class="widgetElement">
+        # Default is already $1,000,000 so only change if profile specifies otherwise.
+        gl_value = MMG_LIABILITY_LIMITS_MAP.get(profile.gl.desired_limits, "1000000")
+        try:
+            gl_select = page.locator("select.widgetElement").first
+            await gl_select.select_option(value=gl_value)
+            print(f"[MMG] GL limit set to value='{gl_value}'.")
+        except Exception as e:
+            print(f"[MMG] GL limit not set — leaving at portal default. ({e})")
 
         # Click Next through remaining sub-pages at defaults
         for section_name in ["Optional", "Tools & Equipment", "Additional Insured", "Credits"]:
@@ -691,9 +727,10 @@ class MMGBopAdapter(CarrierAdapter):
             await page.wait_for_timeout(NAV_SETTLE)
             print(f"[MMG] Coverages > {section_name} — leaving at defaults...")
 
-        # Final Next goes to Additional Info
+        # Final Next — goes to Additional Info (Underwriting) or directly to Summary
         await page.locator("button:has-text('Next')").last.click()
-        await page.wait_for_selector("text=Additional Info", timeout=TIMEOUT)
+        await page.wait_for_load_state("networkidle", timeout=TIMEOUT)
+        print(f"[MMG] After Coverages Next — current page: {page.url}")
 
     async def _fill_additional_info(self, page: Page, profile: ProspectProfile) -> None:
         """Additional Info > Underwriting and Inspection Contact."""
