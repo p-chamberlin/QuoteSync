@@ -55,20 +55,21 @@ CARRIER_REGISTRY: dict[str, dict] = {
 
 def get_carrier_list() -> list[dict]:
     """Return list of carriers with their configuration status."""
-    from quotesync.engine import _session_path, SESSIONS_DIR
-    import re
+    from quotesync.engine import _profile_path
 
     carriers = []
     for carrier_id, info in CARRIER_REGISTRY.items():
         creds = get_credentials(info["env_key"])
-        # Check if a saved session exists for this carrier
-        slug = re.sub(r"[^a-z0-9]+", "_", info["name"].lower()).strip("_")
-        session_file = SESSIONS_DIR / f"{slug}.json"
+        # A profile is considered active if its directory exists and is non-empty
+        from quotesync.carriers.base import CarrierAdapter
+        adapter = load_adapter(carrier_id)
+        profile_dir = _profile_path(adapter)
+        has_session = profile_dir.exists() and any(profile_dir.iterdir())
         carriers.append({
             "id": carrier_id,
             "name": info["name"],
             "configured": creds.is_configured,
-            "has_session": session_file.exists(),
+            "has_session": has_session,
         })
     return carriers
 

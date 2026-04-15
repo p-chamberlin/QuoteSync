@@ -39,8 +39,11 @@ class CarrierAdapter(ABC):
         """Navigate from the dashboard to the 'start new quote' form."""
 
     @abstractmethod
-    async def fill_quote(self, page: Page, profile: ProspectProfile) -> None:
-        """Fill in the quote form using the prospect profile data."""
+    async def fill_quote(self, page: Page, profile: ProspectProfile) -> dict | None:
+        """Fill in the quote form using the prospect profile data.
+
+        Returns a dict with result data (e.g. {"premium": "$4,775"}) or None.
+        """
 
     async def run(self, page: Page, profile: ProspectProfile) -> None:
         """Full workflow: login → navigate → fill."""

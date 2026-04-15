@@ -267,7 +267,7 @@ class AcuityBopAdapter(CarrierAdapter):
 
     # ----- fill_quote (master orchestrator) -----
 
-    async def fill_quote(self, page: Page, profile: ProspectProfile) -> None:
+    async def fill_quote(self, page: Page, profile: ProspectProfile) -> dict | None:
         """Fill the entire Bis-Pak quote form, stopping at Premium Summary."""
         # Use the iRating popup page if available
         p = getattr(self, "_page", page)

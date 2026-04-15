@@ -15,7 +15,7 @@ from pathlib import Path
 from flask import Flask, flash, redirect, render_template, request, url_for
 
 from quotesync.config import get_carrier_list, load_adapter
-from quotesync.engine import run_carrier, load_profile, _session_path
+from quotesync.engine import run_carrier, load_profile, _profile_path
 from quotesync.models.prospect import ProspectProfile
 
 logger = logging.getLogger(__name__)
@@ -147,6 +147,7 @@ def run_quote_start():
         "carrier_name": adapter.name,
         "status": "running",
         "error": None,
+        "premium": None,
     }
 
     # Launch in background thread
@@ -154,8 +155,9 @@ def run_quote_start():
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_carrier(adapter, profile, headed=True))
+            result = loop.run_until_complete(run_carrier(adapter, profile, headed=True))
             _quote_runs[run_id]["status"] = "completed"
+            _quote_runs[run_id]["premium"] = (result or {}).get("premium")
             logger.info("Quote run completed: %s", run_id)
         except Exception as e:
             _quote_runs[run_id]["status"] = "error"
@@ -178,12 +180,13 @@ def run_quote_clear(run_id):
 
 @app.route("/session/<carrier_id>/clear", methods=["POST"])
 def clear_session(carrier_id):
-    """Delete the saved browser session for a carrier, forcing a fresh login next run."""
+    """Delete the saved browser profile for a carrier, forcing a fresh login next run."""
+    import shutil
     try:
         adapter = load_adapter(carrier_id)
-        session_file = _session_path(adapter)
-        if session_file.exists():
-            session_file.unlink()
+        profile_dir = _profile_path(adapter)
+        if any(profile_dir.iterdir()):
+            shutil.rmtree(profile_dir)
             flash(f"Saved session cleared for {adapter.name}. Next run will require login.", "success")
         else:
             flash("No saved session found.", "info")

@@ -250,7 +250,49 @@ class MMGBopAdapter(CarrierAdapter):
             await self._fill_additional_info(page, profile)
         else:
             print("[MMG] No Additional Info section found — skipping to Summary.")
+
+        # Scrape the BOP Premium — wait for the async-loaded dollar value to appear
+        await page.wait_for_load_state("networkidle", timeout=15000)
+        premium = None
+        try:
+            # The portal calculates premium async; wait up to 15s for any $ to appear on page
+            try:
+                await page.wait_for_function(
+                    "() => document.body.innerText.includes('$')",
+                    timeout=15000,
+                )
+            except Exception:
+                print("[MMG] Premium value did not appear within 15s — scraping whatever is present.")
+
+            # Now extract: find the element immediately after the "BOP Premium" label
+            premium = await page.evaluate("""() => {
+                // Walk all text nodes looking for 'BOP Premium', then grab the next sibling text
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    if (node.textContent.includes('BOP Premium')) {
+                        // Try next text node siblings
+                        let sib = walker.nextNode();
+                        while (sib) {
+                            const t = sib.textContent.trim();
+                            if (t && t !== 'BOP Premium') return t;
+                            sib = walker.nextNode();
+                        }
+                    }
+                }
+                // Fallback: first $ amount on page
+                const match = document.body.innerText.match(/\\$[\\d,]+/);
+                return match ? match[0] : null;
+            }""")
+            if premium:
+                print(f"[MMG] BOP Premium: {premium}")
+            else:
+                print("[MMG] BOP Premium not found on page.")
+        except Exception as e:
+            print(f"[MMG] Premium scrape failed: {e}")
+
         print("[MMG] Quote form filled. Review the Summary and Billing pages manually.")
+        return {"premium": premium, "carrier": self.name}
 
     # --- Page-by-page fill methods ---
 
@@ -694,9 +736,51 @@ class MMGBopAdapter(CarrierAdapter):
             except Exception:
                 print("[MMG] Mortgagee entry failed — skipping.")
 
-        await page.locator("button:has-text('Next')").last.click()
-        # Wait for the Save & Continue button — it only appears on Step 5 (Optional Coverages).
-        # "text=Optional Coverages" matches the sidebar and fires too early.
+        # Step 4 → Step 5: Angular wizard — JS click is more reliable than Playwright
+        # click for buttons inside the ice-pagestack-modal overlay.
+        await page.wait_for_timeout(NAV_SETTLE)
+        # Log what buttons are visible before clicking (helps debug if this fails again)
+        btns_before = await page.evaluate(
+            "() => [...document.querySelectorAll('button')].map(b => b.textContent.trim()).filter(Boolean)"
+        )
+        print(f"[MMG] Step4 buttons visible: {btns_before}")
+        # JS click — walks buttons in reverse DOM order so modal button wins over background
+        click_result = await page.evaluate("""() => {
+            const btns = [...document.querySelectorAll('button')];
+            // prefer a button inside the modal wizard
+            const modal = document.querySelector('ice-pagestack-modal-dialog')
+                        || document.querySelector('.modal-content')
+                        || document.querySelector('[class*="modal"]');
+            if (modal) {
+                const mb = [...modal.querySelectorAll('button')].find(b => b.textContent.trim() === 'Next');
+                if (mb) { mb.click(); return 'modal-next'; }
+            }
+            // fallback: last Next button in DOM
+            const all = btns.filter(b => b.textContent.trim() === 'Next');
+            if (all.length) { all[all.length - 1].click(); return 'last-next:' + all.length; }
+            return 'not-found';
+        }""")
+        print(f"[MMG] Step4→5 click: {click_result}")
+        await page.wait_for_timeout(NAV_SETTLE)
+
+        # Confirm we advanced — check for Save & Continue (Step 5) with retry
+        for attempt in range(3):
+            save_count = await page.locator("button:has-text('Save & Continue')").count()
+            if save_count > 0:
+                break
+            print(f"[MMG] Save & Continue not yet visible (attempt {attempt+1}/3) — retrying click...")
+            await page.evaluate("""() => {
+                const modal = document.querySelector('ice-pagestack-modal-dialog')
+                            || document.querySelector('.modal-content');
+                if (modal) {
+                    const mb = [...modal.querySelectorAll('button')].find(b => b.textContent.trim() === 'Next');
+                    if (mb) { mb.click(); return; }
+                }
+                const all = [...document.querySelectorAll('button')].filter(b => b.textContent.trim() === 'Next');
+                if (all.length) all[all.length - 1].click();
+            }""")
+            await page.wait_for_timeout(NAV_SETTLE)
+
         await page.wait_for_selector("button:has-text('Save & Continue')", timeout=TIMEOUT)
 
         # Step 5: Optional Coverages — the final button is "Save & Continue" (not "Next")
