@@ -26,10 +26,11 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import logging
-import re
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
@@ -45,6 +46,44 @@ from quotesync.models.prospect import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Step registry — names used for resume_from
+# ---------------------------------------------------------------------------
+
+STEPS = [
+    "policy_dropdowns",
+    "nature_of_business",
+    "named_insured",
+    "save_dialog",
+    "dun_bradstreet",
+    "line_selection",
+    "location",
+    "building",
+    "unit_options",
+    "policy_options",
+    "additional_interests",
+    "additional_info",
+    "general_info",
+    "premium",
+]
+
+# State file — persists the last saved quote name for resume support
+_STATE_FILE = Path(__file__).parent.parent.parent / "data" / ".acuity_state.json"
+
+
+def _save_state(data: dict) -> None:
+    _STATE_FILE.parent.mkdir(exist_ok=True)
+    _STATE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _load_state() -> dict:
+    if _STATE_FILE.exists():
+        try:
+            return json.loads(_STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
 
 # ---------------------------------------------------------------------------
 # Mapping tables
@@ -202,14 +241,18 @@ class AcuityBopAdapter(CarrierAdapter):
         logger.info("[Acuity] Navigating to login...")
         await page.wait_for_selector("input[type='text'], input[name='Ecom_User_ID']", timeout=30_000)
 
-        # Fill username / password
-        user_input = page.locator("input[name='Ecom_User_ID'], input[type='text']").first
+        # Fill username — click first so any JS focus handlers fire before we type
+        user_input = page.locator("input[name='Ecom_User_AcuityLoginID']").first
+        await user_input.click()
         await user_input.fill(self.username)
-        pass_input = page.locator("input[name='Ecom_Password'], input[type='password']").first
+
+        # Fill password
+        pass_input = page.locator("input[type='password']").first
+        await pass_input.click()
         await pass_input.fill(self.password)
 
-        # Click Login
-        await page.click("input[type='submit'], button:has-text('Login')")
+        # Click Log In — button text is "Log In" (with space), not "Login"
+        await page.click("button:has-text('Log In'), input[type='submit'], input[value='Login']")
 
         # Wait for Agent Center dashboard (may pause for MFA — give 120s)
         try:
@@ -222,74 +265,502 @@ class AcuityBopAdapter(CarrierAdapter):
 
     # ----- navigate to new quote -----
 
-    async def navigate_to_new_quote(self, page: Page) -> None:
-        """From Agent Center, open iRating and set up a new Bis-Pak quote."""
-        logger.info("[Acuity] Navigating to iRating...")
-
-        # The iRating link opens a new window/popup.  Click it and capture.
+    async def _open_irating(self, page: Page) -> Page:
+        """Open the iRating popup from Agent Center and return the iRating page."""
         async with page.context.expect_page() as new_page_info:
-            await page.click("a:has-text('iRating'), a[href*='irating']")
+            await page.click("a:has-text('iRating'), a[href*='irating'], a[href*='MainServlet']")
         irating_page = await new_page_info.value
-        await irating_page.wait_for_load_state("domcontentloaded")
-
-        # Now we're on MainServlet — the policy setup dropdowns
-        await irating_page.wait_for_url("**/MainServlet**", timeout=30_000)
-        logger.info("[Acuity] iRating window opened.")
-
-        # Store reference — all subsequent work happens on this page
+        # Wait for the Main Menu content rather than the URL — the popup may go through
+        # redirects or load an intermediate page before settling on MainServlet.
+        await irating_page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        await irating_page.wait_for_selector(
+            "a:has-text('Start Full Quote'), .pageHeaderBanner:has-text('Main Menu')",
+            timeout=60_000,
+        )
+        logger.info("[Acuity] iRating Main Menu loaded. URL: %s", irating_page.url)
         self._page = irating_page
+        return irating_page
+
+    async def navigate_to_new_quote(self, page: Page) -> None:
+        """From Agent Center, open iRating and click Start Full Quote."""
+        logger.info("[Acuity] Navigating to iRating...")
+        irating_page = await self._open_irating(page)
+
+        # Main Menu is now visible — click Start Full Quote to begin
+        await irating_page.wait_for_selector("a:has-text('Start Full Quote')", timeout=30_000)
+        await irating_page.click("a:has-text('Start Full Quote')")
+        await irating_page.wait_for_load_state("domcontentloaded")
+        logger.info("[Acuity] iRating opened — Start Full Quote clicked.")
+
+    async def navigate_to_saved_quote(self, page: Page) -> None:
+        """Resume mode: open iRating and retrieve the last saved in-progress quote.
+
+        Uses the 'Search by Save Name' form on the Main Menu to find and open
+        the quote saved during _handle_save_dialog.  Falls back to a new quote
+        if no saved state exists.
+        """
+        state = _load_state()
+        quote_name = state.get("last_quote_name")
+
+        if not quote_name:
+            logger.warning("[Acuity] No saved quote name found — starting a new quote instead.")
+            await self.navigate_to_new_quote(page)
+            return
+
+        logger.info("[Acuity] Resume: opening iRating to retrieve '%s'...", quote_name)
+        irating_page = await self._open_irating(page)
+
+        # Main Menu search form: fill save name + click Go
+        await irating_page.wait_for_selector("input[id='searchName']", timeout=15_000)
+        await irating_page.fill("input[id='searchName']", quote_name)
+        await irating_page.click("input[name='searchBySaveName']")
+        await irating_page.wait_for_load_state("domcontentloaded")
+        await irating_page.wait_for_timeout(2000)
+
+        # Results list — click the first matching row
+        try:
+            first_result = irating_page.locator("table a, table tr td a").first
+            await first_result.click(timeout=10_000)
+            await irating_page.wait_for_load_state("domcontentloaded")
+            logger.info("[Acuity] Resumed quote: '%s'", quote_name)
+        except PlaywrightTimeout:
+            logger.warning(
+                "[Acuity] Could not find saved quote '%s' in results — starting new quote.",
+                quote_name,
+            )
+            await irating_page.click("a:has-text('Start Full Quote')")
+            await irating_page.wait_for_load_state("domcontentloaded")
 
     async def _setup_policy_dropdowns(self, page: Page, profile: ProspectProfile) -> None:
-        """Fill the cascading Policy Type / Line / State / Term dropdowns."""
+        """Fill the Policy Selection page dropdowns.
+
+        Cascade order: Exposure State → Policy Type → Line → Term.
+
+        What we know from portal inspection:
+        - Exposure State: Dijit Select wrapping hidden <select id="AgcyState">.
+          Outer container has [widgetid='AgcyState'].  Click it to open popup.
+        - Policy Type: Dijit Select, widgetid unknown until runtime — found by
+          dumping all [widgetid] elements and excluding known ones.
+        - Line (#line): Dijit ComboBox — the visible text input HAS id="line".
+          Fill by clicking it and typing "Bis-Pak", then pick from dropdown.
+        - Term (#term): Same ComboBox pattern, input id="term".
+        """
         logger.info("[Acuity] Setting up policy dropdowns...")
-
-        # Policy Type → "Bis-Pak"
-        await page.select_option("select[name*='policyType'], select[name*='PolicyType']", label="Bis-Pak")
-        await page.wait_for_timeout(1000)
-
-        # Line → "BOP" (becomes available after Policy Type)
-        await page.select_option("select[name*='line'], select[name*='Line']", label="BOP")
-        await page.wait_for_timeout(1000)
-
-        # Exposure State — use mailing address state
-        state = profile.mailing_address.state or "ME"
-        await page.select_option("select[name*='state'], select[name*='State']", label=state)
-        await page.wait_for_timeout(1000)
-
-        # Term — default 12 months
-        await page.select_option("select[name*='term'], select[name*='Term']", label="12")
+        await page.wait_for_load_state("domcontentloaded")
         await page.wait_for_timeout(500)
 
-        # Click Next / Continue to go to Nature of Business
-        await page.click("input[value='Next'], button:has-text('Next')")
-        await page.wait_for_timeout(3000)
-        logger.info("[Acuity] Policy dropdowns set.")
+        state = profile.mailing_address.state or "ME"
+
+        # Dump all Dijit widget container IDs for diagnostics
+        wid_dump = await page.evaluate("""() =>
+            Array.from(document.querySelectorAll('[widgetid]')).map(el => ({
+                wid: el.getAttribute('widgetid'),
+                tag: el.tagName,
+                cls: el.className.slice(0, 50)
+            }))
+        """)
+        print(f"[Acuity] [widgetid] elements: {wid_dump}")
+
+        # ── Reusable: open a Dijit widget and click the option text in its popup ──
+
+        async def _open_and_pick(widget_selector: str, option_text: str, log_name: str) -> bool:
+            """Click widget_selector to open its Dijit popup, then click option_text."""
+            try:
+                await page.click(widget_selector, timeout=5000)
+                print(f"[Acuity] Opened popup for {log_name}")
+                await page.wait_for_timeout(700)
+            except Exception as e:
+                print(f"[Acuity] Could not open {log_name} ({widget_selector}): {e}")
+                return False
+
+            # Click the matching option using JS TreeWalker across all popup containers
+            result = await page.evaluate(
+                """([optText]) => {
+                    const norm = s => s.trim().toLowerCase();
+                    const target = norm(optText);
+                    const containers = document.querySelectorAll(
+                        '.dijitPopup, .dijitSelectMenu, .dijitMenu, [role="listbox"], .dijitComboBoxMenu'
+                    );
+                    for (const c of containers) {
+                        const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (norm(node.textContent) === target && node.childElementCount === 0) {
+                                const r = node.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0) {
+                                    node.click();
+                                    return 'ok:' + node.tagName + ':' + node.className.slice(0, 30);
+                                }
+                            }
+                        }
+                    }
+                    // Pass 2: any popup item that starts with or contains the target
+                    for (const c of containers) {
+                        const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            const t = norm(node.textContent);
+                            if ((t.startsWith(target) || t.includes(target)) && node.childElementCount === 0) {
+                                const r = node.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0) {
+                                    node.click();
+                                    return 'ok-contains:' + node.textContent.trim().slice(0,30);
+                                }
+                            }
+                        }
+                    }
+                    return 'not-found';
+                }""",
+                [option_text],
+            )
+            print(f"[Acuity] {log_name} → '{option_text}': {result}")
+            if str(result).startswith("ok"):
+                # Wait for AJAX cascade triggered by this selection
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    await page.wait_for_timeout(1000)
+                return True
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
+            return False
+
+        # ── Reusable: fill a Dijit ComboBox by typing + picking from suggestion list ──
+
+        async def _fill_combobox(input_id: str, value: str, log_name: str) -> bool:
+            """Click the ComboBox input, type value, pick matching suggestion."""
+            try:
+                await page.click(f"#{input_id}", click_count=3)  # select-all so we replace any text
+                await page.wait_for_timeout(200)
+                await page.type(f"#{input_id}", value, delay=80)  # type chars to trigger autocomplete
+                await page.wait_for_timeout(800)
+            except Exception as e:
+                print(f"[Acuity] ComboBox #{input_id} fill failed: {e}")
+                return False
+
+            # Try clicking the suggestion in the dropdown
+            result = await page.evaluate(
+                """([optText]) => {
+                    const norm = s => s.trim().toLowerCase();
+                    const target = norm(optText);
+                    const containers = document.querySelectorAll(
+                        '.dijitComboBoxMenu, .dijitPopup, [role="listbox"]'
+                    );
+                    // Pass 1: exact case-insensitive match
+                    for (const c of containers) {
+                        const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (norm(node.textContent) === target && node.childElementCount === 0) {
+                                const r = node.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0) {
+                                    node.click();
+                                    return 'ok:' + node.tagName + ':' + node.textContent.trim().slice(0,30);
+                                }
+                            }
+                        }
+                    }
+                    // Pass 2: suggestion starts with typed text (handles truncated options)
+                    for (const c of containers) {
+                        const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (norm(node.textContent).startsWith(target) && node.childElementCount === 0) {
+                                const r = node.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0) {
+                                    node.click();
+                                    return 'ok-starts:' + node.tagName + ':' + node.textContent.trim().slice(0,30);
+                                }
+                            }
+                        }
+                    }
+                    return 'not-found';
+                }""",
+                [value],
+            )
+            print(f"[Acuity] {log_name} ComboBox suggestion: {result}")
+            if result == "not-found":
+                # No autocomplete dropdown — just press Enter to accept the typed value
+                await page.keyboard.press("Enter")
+            await page.wait_for_timeout(500)
+            return True
+
+        # ── Exposure State ─────────────────────────────────────────────────
+        # Dijit Select: outer container has widgetid="AgcyState"
+        await _open_and_pick("[widgetid='AgcyState']", state, "ExposureState")
+
+        # After ExposureState AJAX, the `line` ComboBox auto-opens a popup
+        # with Commercial / Personal options.  Press Escape to close it so it
+        # doesn't block our next click, then re-open it deliberately.
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(800)
+
+        # ── Line = Commercial ──────────────────────────────────────────────
+        # The portal labels [widgetid='line'] as "Policy Type" (Commercial/Personal).
+        # We must pick "Commercial" here before the Plan (Bis-Pak) options appear.
+        await _open_and_pick("[widgetid='line']", "Commercial", "Line(PolicyType)")
+
+        # Give AJAX time to load Plan/Bis-Pak options after Commercial is selected
+        await page.wait_for_timeout(1500)
+
+        # ── Plan = Bis-Pak ─────────────────────────────────────────────────
+        # After Line=Commercial, the `plan` ComboBox (portal labels as "Line" or
+        # "Program") loads specific products including Bis-Pak.
+        await _fill_combobox("plan", "Bis-Pak", "Plan")
+        plan_val = await page.evaluate("document.getElementById('plan')?.value")
+        print(f"[Acuity] Plan current value: '{plan_val}'")
+
+        # Give AJAX time to load Term options after Plan selection
+        await page.wait_for_timeout(1000)
+
+        # ── Insured Information (prefill section) ─────────────────────────
+        # Fill insured info FIRST — it triggers AJAX that resets Term and
+        # Producer, so we must fill those AFTER the insured section settles.
+        # Inner inputs use id="clBusinessName", "clStreet", "clCity", "clZipcode".
+        # clState is a Dijit Select.
+        biz_name = profile.legal_business_name or f"{profile.first_name or ''} {profile.last_name or ''}".strip()
+        if biz_name:
+            try:
+                await page.fill("#clBusinessName", biz_name)
+                await page.wait_for_timeout(200)
+                print(f"[Acuity] Business Name filled: '{biz_name}'")
+            except Exception as e:
+                print(f"[Acuity] Business Name fill failed: {e}")
+
+        addr = profile.mailing_address
+        if addr.street:
+            try:
+                # Inner input has name="clStreet" (id is a generated "customTextBox..." value)
+                await page.fill("input[name='clStreet']", addr.street)
+            except Exception:
+                pass
+        if addr.city:
+            try:
+                await page.fill("#clCity", addr.city)
+            except Exception:
+                pass
+        if addr.state:
+            await _open_and_pick("[widgetid='clState']", addr.state, "InsuredState")
+        if addr.zip_code:
+            try:
+                await page.fill("#clZipcode", addr.zip_code)
+            except Exception:
+                pass
+
+        # Wait for insured AJAX to fully settle before filling Term/Producer
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(800)
+
+        # ── Term ───────────────────────────────────────────────────────────
+        # Fill AFTER insured info — insured AJAX resets this field.
+        await _fill_combobox("term", "12 months", "Term")
+        term_val = await page.evaluate("document.getElementById('term')?.value")
+        print(f"[Acuity] Term current value: '{term_val}'")
+
+        # ── Producer: search for Chamberlin ───────────────────────────────
+        # Fill AFTER insured info — insured AJAX also resets Producer.
+        # Open the subAgentCode widget and click the option containing "Chamberlin".
+        # Falls back to first non-blank option if Chamberlin not found.
+        await page.evaluate("""() => {
+            const el = document.querySelector("[widgetid='subAgentCode']");
+            if (el) el.click();
+        }""")
+        await page.wait_for_timeout(700)
+        producer_pick = await page.evaluate("""() => {
+            const norm = s => s.trim().toLowerCase();
+            const containers = document.querySelectorAll(
+                '.dijitPopup, .dijitSelectMenu, .dijitMenu, [role="listbox"], .dijitComboBoxMenu'
+            );
+            // Pass 1: find option containing "chamberlin"
+            for (const c of containers) {
+                const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    const t = norm(node.textContent);
+                    if (t.includes('chamberlin') && node.childElementCount === 0) {
+                        const r = node.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            node.click();
+                            return 'ok-chamberlin:' + node.textContent.trim().slice(0, 40);
+                        }
+                    }
+                }
+            }
+            // Pass 2: first non-blank, non-"select" option
+            for (const c of containers) {
+                const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    const t = norm(node.textContent);
+                    if (t && t !== 'select' && node.childElementCount === 0) {
+                        const r = node.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            node.click();
+                            return 'ok-fallback:' + node.textContent.trim().slice(0, 40);
+                        }
+                    }
+                }
+            }
+            return 'not-found';
+        }""")
+        print(f"[Acuity] Producer: {producer_pick}")
+        if not producer_pick.startswith("ok"):
+            await page.keyboard.press("Escape")
+        await page.wait_for_timeout(400)
+
+        # ── CSR — pick first available option ─────────────────────────────
+        await page.evaluate("""() => {
+            const el = document.querySelector("[widgetid='csrAccountManagerCode']");
+            if (el) el.click();
+        }""")
+        await page.wait_for_timeout(600)
+        csr_pick = await page.evaluate("""() => {
+            const norm = s => s.trim().toLowerCase();
+            const containers = document.querySelectorAll(
+                '.dijitPopup, .dijitSelectMenu, .dijitMenu, [role="listbox"], .dijitComboBoxMenu'
+            );
+            for (const c of containers) {
+                const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    const t = norm(node.textContent);
+                    if (t && t !== 'select' && node.childElementCount === 0) {
+                        const r = node.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            node.click();
+                            return 'ok:' + node.textContent.trim().slice(0, 40);
+                        }
+                    }
+                }
+            }
+            return 'not-found';
+        }""")
+        print(f"[Acuity] CSR: {csr_pick}")
+        if not csr_pick.startswith("ok"):
+            await page.keyboard.press("Escape")
+        await page.wait_for_timeout(400)
+
+        # Click Next to proceed to Nature of Business
+        await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
+        await page.wait_for_load_state("domcontentloaded")
+        await page.wait_for_timeout(2000)
+
+        title = await page.title()
+        if "Policy Selection" in title:
+            print(f"[Acuity] WARNING: Still on Policy Selection ('{title}').")
+        else:
+            print(f"[Acuity] Advanced → '{title}'")
+        logger.info("[Acuity] Policy dropdowns done.")
 
     # ----- fill_quote (master orchestrator) -----
 
-    async def fill_quote(self, page: Page, profile: ProspectProfile) -> dict | None:
-        """Fill the entire Bis-Pak quote form, stopping at Premium Summary."""
+    async def fill_quote(
+        self,
+        page: Page,
+        profile: ProspectProfile,
+        resume_from: str | None = None,
+    ) -> dict | None:
+        """Fill the entire Bis-Pak quote form, stopping at Premium Summary.
+
+        resume_from: name of the step to resume from (see STEPS list at top of
+        file).  All earlier steps are skipped — the browser must already be at
+        the correct page state (navigate_to_saved_quote handles that).
+        """
         # Use the iRating popup page if available
         p = getattr(self, "_page", page)
 
-        await self._setup_policy_dropdowns(p, profile)
-        await self._fill_nature_of_business(p, profile)
-        await self._fill_named_insured(p, profile)
-        await self._handle_save_dialog(p, profile)
-        await self._handle_dun_bradstreet(p)
-        await self._fill_line_selection(p, profile)
-        await self._fill_location(p, profile)
-        await self._fill_building(p, profile)
-        await self._fill_unit_options(p)
-        await self._fill_policy_options(p)
-        await self._fill_additional_interests(p)
-        await self._fill_additional_info(p, profile)
-        await self._fill_general_info(p, profile)
+        # Determine which step index to start from
+        start_idx = 0
+        if resume_from:
+            if resume_from in STEPS:
+                start_idx = STEPS.index(resume_from)
+                logger.info("[Acuity] Resuming from step %d: '%s'", start_idx, resume_from)
+            else:
+                logger.warning(
+                    "[Acuity] Unknown resume_from step '%s' — running all steps. "
+                    "Valid steps: %s", resume_from, STEPS
+                )
+
+        def _should_run(step: str) -> bool:
+            return STEPS.index(step) >= start_idx
+
+        def _skip(step: str) -> None:
+            logger.info("[Acuity] Skipping step: %s", step)
+
+        if _should_run("policy_dropdowns"):
+            await self._setup_policy_dropdowns(p, profile)
+        else:
+            _skip("policy_dropdowns")
+
+        if _should_run("nature_of_business"):
+            await self._fill_nature_of_business(p, profile)
+        else:
+            _skip("nature_of_business")
+
+        if _should_run("named_insured"):
+            await self._fill_named_insured(p, profile)
+        else:
+            _skip("named_insured")
+
+        if _should_run("save_dialog"):
+            await self._handle_save_dialog(p, profile)
+        else:
+            _skip("save_dialog")
+
+        if _should_run("dun_bradstreet"):
+            await self._handle_dun_bradstreet(p)
+        else:
+            _skip("dun_bradstreet")
+
+        if _should_run("line_selection"):
+            await self._fill_line_selection(p, profile)
+        else:
+            _skip("line_selection")
+
+        if _should_run("location"):
+            await self._fill_location(p, profile)
+        else:
+            _skip("location")
+
+        if _should_run("building"):
+            await self._fill_building(p, profile)
+        else:
+            _skip("building")
+
+        if _should_run("unit_options"):
+            await self._fill_unit_options(p)
+        else:
+            _skip("unit_options")
+
+        if _should_run("policy_options"):
+            await self._fill_policy_options(p)
+        else:
+            _skip("policy_options")
+
+        if _should_run("additional_interests"):
+            await self._fill_additional_interests(p)
+        else:
+            _skip("additional_interests")
+
+        if _should_run("additional_info"):
+            await self._fill_additional_info(p, profile)
+        else:
+            _skip("additional_info")
+
+        if _should_run("general_info"):
+            await self._fill_general_info(p, profile)
+        else:
+            _skip("general_info")
+
         premium = await self._scrape_premium(p)
 
         logger.info("[Acuity] === QUOTE COMPLETE ===")
-        logger.info("[Acuity] Premium: $%s", premium)
+        logger.info("[Acuity] Premium: %s", premium)
         logger.info("[Acuity] STOPPED before bind. Agent must review manually.")
+        return {"premium": str(premium) if premium else None, "carrier": self.name}
 
     # ----- Page: Nature of Business -----
 
@@ -297,41 +768,175 @@ class AcuityBopAdapter(CarrierAdapter):
         """Search for class code on the Nature of Business page."""
         logger.info("[Acuity] Filling Nature of Business...")
 
-        # Business Type dropdown — map from risk_class
-        if profile.risk_class:
-            btype = ACUITY_PLAN_MAP.get(profile.risk_class.value, "Contractor")
+        # Guard: make sure we actually advanced off Policy Selection
+        title = await page.title()
+        if "Policy Selection" in title:
+            raise RuntimeError(
+                f"[Acuity] _fill_nature_of_business called while still on Policy Selection "
+                f"(title='{title}'). Policy dropdowns likely failed validation."
+            )
+        print(f"[Acuity] Nature of Business page: '{title}'")
+
+        # KEY FACT: The NofB search UI lives inside an iframe, not the main page DOM.
+        # Dialog: <div id="noboTableDiv" widgetid="noboTableDiv" class="dijitDialog">
+        # Iframe:  <iframe class="noboTableIFrame"
+        #            src="/irating/servlet/CCServlet?PageID=...NoboTablePage">
+        # All fields (noboDescription, glClass, naicsCode, plan) are in the iframe's DOM.
+        # The iframe auto-opens with a ~2s delay after page navigation.
+        # Use page.frame_locator('iframe.noboTableIFrame') to interact with its content.
+        # Use JS .click() on nextButton at the end to bypass the modal overlay.
+
+        # Wait for the NofB modal iframe to appear (opens ~2s after page load)
+        try:
+            await page.wait_for_selector("iframe.noboTableIFrame", timeout=30000)
+            print("[Acuity] NofB modal iframe appeared")
+        except PlaywrightTimeout:
+            print("[Acuity] WARNING: NofB modal iframe did not appear after 30s")
+
+        # Give the iframe content a moment to render
+        await page.wait_for_timeout(1000)
+
+        # All NofB fields are in the iframe — use frame_locator to interact with them
+        nob = page.frame_locator("iframe.noboTableIFrame")
+
+        # Determine search term
+        raw_code = (profile.sic_naics_code or "").strip()
+        desc_term = (profile.operations_description or "").strip()
+        is_gl_code = raw_code and len(raw_code) <= 5 and " " not in raw_code
+        is_naics = raw_code and len(raw_code) == 6 and raw_code.isdigit()
+        gl_code = raw_code if is_gl_code else ""
+        naics_code = raw_code if is_naics else ""
+        if raw_code and not is_gl_code and not is_naics:
+            # Word-form: normalize for Acuity's substring search.
+            # Lowercase + singularize: "Apartments" → "apartment" matches
+            # "Apartment Buildings", "Apartment - 4 Stories", etc.
+            term = raw_code.lower()
+            if term.endswith("s") and len(term) > 4:
+                term = term[:-1]  # "apartments" → "apartment"
+            desc_term = term
+
+        if naics_code:
             try:
-                await page.select_option("select[name*='businessType'], select[name*='BusinessType']", label=btype)
+                await nob.locator("input[name='naicsCode']").fill(naics_code)
+                print(f"[Acuity] NAICS set: '{naics_code}'")
+            except Exception as e:
+                print(f"[Acuity] NAICS fill error: {e}")
+        elif gl_code:
+            try:
+                await nob.locator("input[name='glClass']").fill(gl_code)
+                print(f"[Acuity] GL Class set: '{gl_code}'")
+            except Exception as e:
+                print(f"[Acuity] GL class fill error: {e}")
+        elif desc_term:
+            try:
+                await nob.locator("input[name='noboDescription']").fill(desc_term)
+                print(f"[Acuity] Description set: '{desc_term}'")
+            except Exception as e:
+                print(f"[Acuity] Description fill error: {e}")
+
+        # Click Search button inside the iframe
+        search_clicked = False
+        for sel in [
+            "input[value='Search']",
+            "input[type='submit']",
+            "button:has-text('Search')",
+            "a:has-text('Search')",
+        ]:
+            try:
+                await nob.locator(sel).first.click(timeout=3000)
+                print(f"[Acuity] Search clicked via: {sel}")
+                search_clicked = True
+                break
             except Exception:
-                logger.warning("[Acuity] Could not set Business Type to '%s'", btype)
-
-        # Search by operations description or SIC/NAICS code
-        search_term = profile.sic_naics_code or profile.operations_description or ""
-        if search_term:
-            search_input = page.locator("input[name*='search'], input[name*='Search'], input[type='text']").first
-            await search_input.fill(search_term)
-            await page.click("input[value='Search'], button:has-text('Search')")
-            await page.wait_for_timeout(3000)
-
-            # Results appear in a table — click the first matching row
-            # The user should verify this is the correct class code
-            first_result = page.locator("table a, table tr td a").first
+                pass
+        if not search_clicked:
+            # Fallback: press Enter in whichever field was filled
+            field_name = "naicsCode" if naics_code else ("glClass" if gl_code else "noboDescription")
             try:
-                await first_result.click(timeout=10_000)
-                logger.info("[Acuity] Selected first class code result for '%s'", search_term)
-            except PlaywrightTimeout:
-                logger.warning("[Acuity] No search results found for '%s' — user must select class manually.", search_term)
-                # Pause and wait for user to select a class code
-                await page.wait_for_timeout(30_000)
+                await nob.locator(f"input[name='{field_name}']").press("Enter")
+                print(f"[Acuity] Search via Enter on {field_name}")
+            except Exception as e:
+                print(f"[Acuity] Search Enter fallback error: {e}")
 
-        # After class selection, dynamic class-specific questions may appear.
-        # These vary by class code and can't be fully automated.
-        # We fill what we can and pause for the user to handle the rest.
+        await page.wait_for_timeout(2000)
+
+        # Helper: try to click first result, return True on success
+        async def _click_first_result() -> bool:
+            try:
+                await nob.locator("table a, td a").first.click(timeout=5000)
+                return True
+            except PlaywrightTimeout:
+                return False
+
+        # Helper: search with a given description term
+        async def _search_desc(term: str) -> None:
+            await nob.locator("input[name='noboDescription']").fill(term)
+            for sel in ["input[value='Search']", "input[type='submit']"]:
+                try:
+                    await nob.locator(sel).first.click(timeout=2000)
+                    return
+                except Exception:
+                    pass
+            await nob.locator("input[name='noboDescription']").press("Enter")
+
+        search_label = naics_code or gl_code or desc_term
+        if not await _click_first_result():
+            # No results — try first word only (e.g. "apartment complex" → "apartment")
+            if desc_term and " " in desc_term:
+                retry_term = desc_term.split()[0]
+                print(f"[Acuity] No results for '{search_label}' — retrying with '{retry_term}'")
+                await _search_desc(retry_term)
+                await page.wait_for_timeout(2000)
+
+            if not await _click_first_result():
+                print(f"[Acuity] No results — waiting 120s for manual class selection.")
+                await page.wait_for_timeout(120_000)
+                # After 120s, check if user selected a class (modal auto-closes on selection)
+                modal_still_open = await page.evaluate("""() => {
+                    const d = document.getElementById('noboTableDiv');
+                    if (!d) return false;
+                    const s = getComputedStyle(d);
+                    return s.display !== 'none' && s.visibility !== 'hidden';
+                }""")
+                if modal_still_open:
+                    # Try clicking first result one more time in case results loaded
+                    if not await _click_first_result():
+                        print("[Acuity] WARNING: No class selected after 120s — proceeding anyway. "
+                              "Quote may fail validation.")
+            else:
+                print(f"[Acuity] Selected first class code result (retry)")
+                await page.wait_for_timeout(1500)
+        else:
+            print(f"[Acuity] Selected first class code result for '{search_label}'")
+            await page.wait_for_timeout(1500)
+
+        # After class selection, handle any class-specific questions
         await self._handle_class_questions(page, profile)
 
-        # Click Next to proceed to Named Insured
-        await page.click("input[value='Next'], button:has-text('Next')")
-        await page.wait_for_timeout(3000)
+        # Click Next via JS (NofB iframe always intercepts Playwright pointer events)
+        await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
+
+        # Wait for the NofB modal to close — if no class was selected, validation
+        # rejects the click and the modal stays open, blocking all subsequent steps.
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const d = document.getElementById('noboTableDiv');
+                    if (!d) return true;
+                    const s = getComputedStyle(d);
+                    return s.display === 'none' || s.visibility === 'hidden'
+                        || d.getAttribute('aria-hidden') === 'true';
+                }""",
+                timeout=15_000,
+            )
+            print("[Acuity] NofB modal closed — advancing to Named Insured.")
+        except PlaywrightTimeout:
+            raise RuntimeError(
+                "[Acuity] NofB modal did not close after Next click — no class was selected. "
+                "Run again and select a class within the 120s window."
+            )
+
+        await page.wait_for_timeout(2000)
         logger.info("[Acuity] Nature of Business complete.")
 
     async def _handle_class_questions(self, page: Page, profile: ProspectProfile) -> None:
@@ -364,59 +969,186 @@ class AcuityBopAdapter(CarrierAdapter):
         """Fill the Named Insured and address page."""
         logger.info("[Acuity] Filling Named Insured...")
 
-        # Insured name — Acuity uses a single name field for businesses
+        # ── Wait for Named Insured page to be active ────────────────────────
+        # Acuity loads all pages simultaneously; after NofB Next, the NI content
+        # pane becomes visible. Wait for title to change from "Nature of Business".
+        print("[Acuity NI] Waiting for Named Insured page to become active...")
+        try:
+            await page.wait_for_function(
+                "() => !document.title.includes('Nature of Business')",
+                timeout=30000,
+            )
+            ni_title = await page.title()
+            print(f"[Acuity NI] Page active: '{ni_title}'")
+        except PlaywrightTimeout:
+            ni_title = await page.title()
+            print(f"[Acuity NI] WARNING: title still '{ni_title}' after 30s — proceeding anyway")
+
+        await page.wait_for_timeout(1500)  # let Dijit widgets finish rendering
+
+        # ── Diagnostic: visible widgetid elements and text inputs ────────────
+        vis_dump = await page.evaluate("""() => {
+            function isVisible(el) {
+                let e = el;
+                while (e) {
+                    const s = getComputedStyle(e);
+                    if (s.display === 'none' || s.visibility === 'hidden') return false;
+                    e = e.parentElement;
+                }
+                return el.offsetWidth > 0 || el.offsetHeight > 0;
+            }
+            const wids = Array.from(document.querySelectorAll('[widgetid]'))
+                .filter(isVisible)
+                .map(el => ({wid: el.getAttribute('widgetid'), cls: el.className.slice(0, 40)}));
+            const inputs = Array.from(document.querySelectorAll('input'))
+                .filter(isVisible)
+                .map(el => ({id: el.id, name: el.name, type: el.type, val: el.value.slice(0,20)}));
+            return {wids, inputs};
+        }""")
+        print(f"[Acuity NI] visible widgetids: {[w['wid'] for w in vis_dump.get('wids', [])]}")
+        print(f"[Acuity NI] visible inputs: {vis_dump.get('inputs', [])}")
+
+        # ── Reusable: open a Dijit Select popup and click the matching option ──
+        async def _pick(widget_selector: str, option_text: str, log_name: str) -> bool:
+            try:
+                await page.click(widget_selector, timeout=5000)
+                await page.wait_for_timeout(700)
+            except Exception as e:
+                print(f"[Acuity NI] Could not open {log_name}: {e}")
+                return False
+            result = await page.evaluate(
+                """([optText]) => {
+                    const norm = s => s.trim().toLowerCase();
+                    const target = norm(optText);
+                    const containers = document.querySelectorAll(
+                        '.dijitPopup, .dijitSelectMenu, .dijitMenu, [role="listbox"], .dijitComboBoxMenu'
+                    );
+                    for (const c of containers) {
+                        const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            if (norm(node.textContent) === target && node.childElementCount === 0) {
+                                const r = node.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0) {
+                                    node.click();
+                                    return 'ok:' + node.tagName + ':' + node.className.slice(0, 30);
+                                }
+                            }
+                        }
+                    }
+                    for (const c of containers) {
+                        const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                        let node;
+                        while ((node = walker.nextNode())) {
+                            const t = norm(node.textContent);
+                            if ((t.startsWith(target) || t.includes(target)) && node.childElementCount === 0) {
+                                const r = node.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0) {
+                                    node.click();
+                                    return 'ok-contains:' + node.textContent.trim().slice(0, 30);
+                                }
+                            }
+                        }
+                    }
+                    return 'not-found';
+                }""",
+                [option_text],
+            )
+            print(f"[Acuity NI] {log_name} → '{option_text}': {result}")
+            if str(result).startswith("ok"):
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    await page.wait_for_timeout(1000)
+                return True
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(300)
+            return False
+
+        # ── Business name ────────────────────────────────────────────────────
+        # On Policy Selection, clBusinessName was already pre-filled.
+        # Named Insured page has a separate insuredName field. Try known ids;
+        # the diagnostic above will reveal the real id if these fail.
         name = profile.legal_business_name
         if not name and profile.first_name:
             name = f"{profile.first_name} {profile.last_name}".strip()
 
-        name_input = page.locator("input[name*='nsuredName'], input[name*='Name'], input[id*='name']").first
-        try:
-            await name_input.fill(name)
-        except Exception:
-            # Try broader selector
-            inputs = page.locator("input[type='text']")
-            if await inputs.count() > 0:
-                await inputs.first.fill(name)
-
-        # Address fields
-        addr = profile.mailing_address
-        if addr.street:
-            addr_input = page.locator("input[name*='ddress'], input[name*='street'], input[id*='addr']").first
+        name_filled = False
+        for field_id in ["insuredName", "namedInsured", "insName", "businessName", "insured_name"]:
             try:
-                await addr_input.fill(addr.street)
+                await page.fill(f"#{field_id}", name, timeout=3000)
+                print(f"[Acuity NI] business name filled via #{field_id}")
+                name_filled = True
+                break
             except Exception:
                 pass
+        if not name_filled:
+            print(f"[Acuity NI] WARNING: could not fill business name '{name}' — check diagnostic above for correct field id")
+
+        # ── Address ──────────────────────────────────────────────────────────
+        # Named Insured address widgetids (from diagnostic): street, city, state, zipcode
+        # Inner inputs have id = widgetid for Dijit TextBox.
+        addr = profile.mailing_address
+
+        if addr.street:
+            for fid in ["street", "street1", "addr1", "address"]:
+                try:
+                    await page.fill(f"#{fid}", addr.street, timeout=3000)
+                    print(f"[Acuity NI] street filled via #{fid}")
+                    break
+                except Exception:
+                    pass
 
         if addr.city:
-            city_input = page.locator("input[name*='ity'], input[id*='city']").first
-            try:
-                await city_input.fill(addr.city)
-            except Exception:
-                pass
-
-        if addr.state:
-            try:
-                await page.select_option("select[name*='tate'], select[id*='state']", label=addr.state)
-            except Exception:
-                pass
+            for fid in ["city", "city1", "insuredCity"]:
+                try:
+                    await page.fill(f"#{fid}", addr.city, timeout=3000)
+                    print(f"[Acuity NI] city filled via #{fid}")
+                    break
+                except Exception:
+                    pass
 
         if addr.zip_code:
-            zip_input = page.locator("input[name*='ip'], input[id*='zip']").first
+            for fid in ["zipcode", "zip", "zipCode", "postalCode"]:
+                try:
+                    await page.fill(f"#{fid}", addr.zip_code, timeout=3000)
+                    print(f"[Acuity NI] zip filled via #{fid}")
+                    break
+                except Exception:
+                    pass
+
+        if addr.state:
+            # State is a Dijit Select — use popup-click approach
+            state_picked = await _pick("[widgetid='state']", addr.state, "NI State")
+            if not state_picked:
+                # Fallback: try native select
+                try:
+                    await page.select_option("select[name='state'], select[id='state']", label=addr.state)
+                except Exception:
+                    pass
+
+        # ── Phone ────────────────────────────────────────────────────────────
+        if hasattr(profile, "phone") and profile.phone:
             try:
-                await zip_input.fill(addr.zip_code)
+                await page.fill("#phoneNbr", profile.phone, timeout=3000)
+                print(f"[Acuity NI] phone filled")
             except Exception:
                 pass
 
-        # Business Status (Entity Type)
-        if profile.entity_type:
-            entity_text = ACUITY_ENTITY_MAP.get(profile.entity_type.value, "Other")
-            try:
-                await page.select_option("select[name*='usiness'], select[name*='entity'], select[name*='status']", label=entity_text)
-            except Exception:
-                logger.warning("[Acuity] Could not set Business Status to '%s'", entity_text)
+        await page.wait_for_timeout(500)
 
-        # Click Next
-        await page.click("input[value='Next'], button:has-text('Next')")
+        # ── Click Next via JS (same pattern as NofB) ─────────────────────────
+        next_result = await page.evaluate("""() => {
+            const btn = document.getElementById('nextButton')
+                || Array.from(document.querySelectorAll('input[value="Next"], button'))
+                    .find(b => (b.value || b.textContent || '').trim() === 'Next');
+            if (btn) { btn.click(); return 'ok:' + (btn.id || btn.value || btn.textContent.trim()); }
+            return 'not_found';
+        }""")
+        print(f"[Acuity NI] Next click -> {next_result}")
+        if next_result == 'not_found':
+            await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
+
         await page.wait_for_timeout(3000)
         logger.info("[Acuity] Named Insured complete.")
 
@@ -434,6 +1166,8 @@ class AcuityBopAdapter(CarrierAdapter):
             await page.click("input[value='Save'], button:has-text('Save'), input[value='OK']")
             await page.wait_for_timeout(3000)
             logger.info("[Acuity] Quote saved as '%s'", save_name)
+            # Persist for resume_from support
+            _save_state({"last_quote_name": save_name})
         except PlaywrightTimeout:
             logger.info("[Acuity] No Save dialog appeared — continuing.")
 
@@ -457,19 +1191,17 @@ class AcuityBopAdapter(CarrierAdapter):
 
     async def _fill_line_selection(self, page: Page, profile: ProspectProfile) -> None:
         """Fill the Bis-Pak line selection summary: Program, Enhancements, Liability, Med Exp."""
-        logger.info("[Acuity] Filling Line Selection / Bis-Pak Summary...")
+        title = await page.title()
+        print(f"[Acuity] _fill_line_selection — page: '{title}'")
 
         # Program dropdown — default to "Deluxe" if available
         try:
             await page.select_option("select[name*='rogram'], select[name*='Program']", label="Deluxe")
         except Exception:
-            logger.info("[Acuity] Could not set Program — using default.")
+            pass  # default is fine
 
-        # Property Enhancements — leave at default (Silver)
-        # Business Liability Enhancements — leave at default (Silver)
-
-        # Liability Limits — map from GL details
-        limits = profile.gl.desired_limits  # e.g. "1M/2M"
+        # Liability Limits — map from GL details (guard for None gl)
+        limits = (profile.gl.desired_limits if profile.gl else None) or "1M/2M"
         limits_map = {
             "300K/600K": "$300,000",
             "500K/1M": "$500,000",
@@ -481,41 +1213,41 @@ class AcuityBopAdapter(CarrierAdapter):
             liability_selects = page.locator("select[name*='iability'], select[name*='Liability']")
             if await liability_selects.count() > 0:
                 await liability_selects.first.select_option(label=limit_value)
-        except Exception:
-            logger.warning("[Acuity] Could not set Liability Limit to '%s'", limit_value)
-
-        # Medical Expenses — leave at default ($5,000)
+                print(f"[Acuity] Liability limit = {limit_value}")
+        except Exception as e:
+            logger.warning("[Acuity] Could not set Liability Limit to '%s': %s", limit_value, e)
 
         # Subcontractors question — may appear here
         if profile.uses_subcontractors is False:
             try:
-                sub_select = page.locator("select[name*='ubcontract'], text=Subcontractors")
-                if await sub_select.count() > 0:
-                    # Select "No" for subcontractors
+                if await page.locator("select[name*='ubcontract']").count() > 0:
                     await page.select_option("select[name*='ubcontract']", label="No")
             except Exception:
                 pass
         elif profile.uses_subcontractors is True:
             if profile.pct_work_subcontracted and profile.pct_work_subcontracted > 50:
-                logger.warning("[Acuity] >50%% subcontracted — may be ineligible for Bis-Pak. Continuing anyway.")
+                logger.warning("[Acuity] >50%% subcontracted — may be ineligible for Bis-Pak.")
 
-        # Click Next to proceed
-        await page.click("input[value='Next'], button:has-text('Next')")
+        await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
         await page.wait_for_timeout(3000)
-        logger.info("[Acuity] Line Selection complete.")
+        print("[Acuity] Line Selection done.")
 
     # ----- Location modal -----
 
     async def _fill_location(self, page: Page, profile: ProspectProfile) -> None:
         """Add location via the Location modal."""
-        logger.info("[Acuity] Adding Location...")
+        title = await page.title()
+        print(f"[Acuity] _fill_location — page: '{title}'")
 
         # Click "Add Location" button
         try:
-            await page.click("input[value*='Add Location'], button:has-text('Add Location'), a:has-text('Add Location')")
+            await page.click(
+                "input[value*='Add Location'], button:has-text('Add Location'), a:has-text('Add Location')",
+                timeout=5000,
+            )
             await page.wait_for_timeout(2000)
         except Exception:
-            logger.warning("[Acuity] Could not find Add Location button — may already be on location page.")
+            print("[Acuity] No 'Add Location' button — may already be on location form.")
 
         # Location address — use first location or mailing address
         loc = profile.locations[0] if profile.locations else None
@@ -523,40 +1255,57 @@ class AcuityBopAdapter(CarrierAdapter):
 
         if addr.street:
             try:
-                addr_input = page.locator("input[name*='ddress'], input[name*='street']").first
-                await addr_input.fill(addr.street)
+                await page.locator(
+                    "input[name*='ddress'], input[name*='street'], input[name*='Address']"
+                ).first.fill(addr.street)
             except Exception:
                 pass
 
         if addr.city:
             try:
-                await page.locator("input[name*='ity']").first.fill(addr.city)
+                await page.locator("input[name*='ity'], input[name*='City']").first.fill(addr.city)
             except Exception:
                 pass
 
         if addr.state:
             try:
-                await page.select_option("select[name*='tate']", label=addr.state)
+                # Try case-insensitive-ish partial match for state select
+                await page.select_option(
+                    "select[name*='tate'], select[name*='State'], select[name*='STATE']",
+                    label=addr.state,
+                )
             except Exception:
                 pass
 
         if addr.zip_code:
             try:
-                await page.locator("input[name*='ip']").first.fill(addr.zip_code)
+                await page.locator(
+                    "input[name*='ip'], input[name*='Zip'], input[name*='ZIP']"
+                ).first.fill(addr.zip_code)
+                await page.wait_for_timeout(1500)  # ZIP triggers territory lookup
             except Exception:
                 pass
 
-        # Territory — auto-selected by ZIP code, but may need manual selection
-        # Protection Class — locked/read-only, auto-filled from ZIP
+        # Territory / Protection Class — auto-filled from ZIP; just wait
+        await page.wait_for_timeout(1000)
 
-        # Click Add/Save to confirm location
-        try:
-            await page.click("input[value*='Add'], button:has-text('Add'), input[value='Save']")
-            await page.wait_for_timeout(3000)
-        except Exception:
-            logger.warning("[Acuity] Could not confirm location — user may need to click Add.")
+        # Click Add/Save to confirm location — prefer specific "Add Location" text
+        for btn_sel in [
+            "input[value='Add Location']",
+            "button:has-text('Add Location')",
+            "input[value='Add']",
+            "button:has-text('Add')",
+            "input[value='Save']",
+        ]:
+            try:
+                await page.click(btn_sel, timeout=2000)
+                await page.wait_for_timeout(3000)
+                print(f"[Acuity] Location confirmed via '{btn_sel}'")
+                break
+            except Exception:
+                continue
 
-        logger.info("[Acuity] Location added.")
+        print("[Acuity] Location done.")
 
     # ----- Building modal -----
 
@@ -667,21 +1416,34 @@ class AcuityBopAdapter(CarrierAdapter):
                 pass
 
         # Click Add/Save to confirm building
-        try:
-            await page.click("input[value*='Add'], button:has-text('Add Building'), input[value='Save']")
-            await page.wait_for_timeout(3000)
-        except Exception:
-            logger.warning("[Acuity] Could not confirm building — user may need to click Add.")
+        for btn_sel in [
+            "input[value='Add Building']",
+            "button:has-text('Add Building')",
+            "input[value='Add']",
+            "input[value='Save']",
+        ]:
+            try:
+                await page.click(btn_sel, timeout=2000)
+                await page.wait_for_timeout(3000)
+                print(f"[Acuity] Building confirmed via '{btn_sel}'")
+                break
+            except Exception:
+                continue
 
         # Add Liability Class modal may appear — click Add if present
+        # (be specific: look for a button/input that contains "Liability" or matches exactly "Add")
         try:
-            add_class_btn = page.locator("input[value*='Add'], button:has-text('Add')")
-            await add_class_btn.click(timeout=5000)
+            add_class_btn = page.locator(
+                "button:has-text('Add Liability'), input[value='Add Liability'], "
+                "button:has-text('Add Class'), input[value='Add Class']"
+            )
+            await add_class_btn.click(timeout=4000)
             await page.wait_for_timeout(2000)
+            print("[Acuity] Add Liability Class clicked.")
         except PlaywrightTimeout:
             pass
 
-        logger.info("[Acuity] Building added.")
+        print("[Acuity] Building done.")
 
     # ----- Bis-Pak Unit Options -----
 
@@ -691,7 +1453,7 @@ class AcuityBopAdapter(CarrierAdapter):
 
         # Click Next to proceed (don't toggle any optional coverages)
         try:
-            await page.click("input[value='Next'], button:has-text('Next')")
+            await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
             await page.wait_for_timeout(3000)
         except Exception:
             pass
@@ -703,7 +1465,7 @@ class AcuityBopAdapter(CarrierAdapter):
         logger.info("[Acuity] Bis-Pak Policy Options — leaving at defaults...")
 
         try:
-            await page.click("input[value='Next'], button:has-text('Next')")
+            await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
             await page.wait_for_timeout(3000)
         except Exception:
             pass
@@ -715,7 +1477,7 @@ class AcuityBopAdapter(CarrierAdapter):
         logger.info("[Acuity] Additional Interests — skipping...")
 
         try:
-            await page.click("input[value='Next'], button:has-text('Next')")
+            await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
             await page.wait_for_timeout(3000)
         except Exception:
             pass
@@ -784,7 +1546,7 @@ class AcuityBopAdapter(CarrierAdapter):
                 logger.warning("[Acuity] Error filling claim details — user should verify.")
 
         # Click Next
-        await page.click("input[value='Next'], button:has-text('Next')")
+        await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
         await page.wait_for_timeout(3000)
         logger.info("[Acuity] Loss History complete.")
 
@@ -792,64 +1554,134 @@ class AcuityBopAdapter(CarrierAdapter):
 
     async def _fill_general_info(self, page: Page, profile: ProspectProfile) -> None:
         """Fill the General Info page (max stories question)."""
-        logger.info("[Acuity] Filling General Information...")
+        title = await page.title()
+        print(f"[Acuity] _fill_general_info — page: '{title}'")
 
         # "Up to how many stories does the insured building have?"
-        stories = profile.property.number_of_stories or 1
+        stories = (profile.property.number_of_stories if profile.property else None) or 1
         if stories >= 4:
             dropdown_value = "4+"
             logger.warning("[Acuity] Building has 4+ stories — may exceed Bis-Pak eligibility.")
         else:
             dropdown_value = str(stories)
 
-        try:
-            await page.select_option("select", label=dropdown_value)
-        except Exception:
-            logger.warning("[Acuity] Could not set max stories to '%s'", dropdown_value)
+        # Dump all selects so we can see what's on this page
+        select_info = await page.evaluate("""() => {
+            return Array.from(document.querySelectorAll('select')).map(s => ({
+                id: s.id, name: s.name,
+                opts: Array.from(s.options).map(o => o.text).slice(0, 8)
+            }));
+        }""")
+        print(f"[Acuity] General Info selects: {select_info}")
+
+        # Try to find the stories dropdown by matching option text
+        set_stories = await page.evaluate(
+            """([val]) => {
+                const selects = Array.from(document.querySelectorAll('select'));
+                for (const s of selects) {
+                    const opt = Array.from(s.options).find(o => o.text.trim() === val);
+                    if (opt) {
+                        s.value = opt.value;
+                        s.dispatchEvent(new Event('change', {bubbles: true}));
+                        return 'ok:' + (s.id || s.name) + '=' + opt.text;
+                    }
+                }
+                // Try numeric match (option text might include "1 Story" etc)
+                const numVal = val.replace('+', '');
+                for (const s of selects) {
+                    const opt = Array.from(s.options).find(o => o.text.trim().startsWith(numVal));
+                    if (opt) {
+                        s.value = opt.value;
+                        s.dispatchEvent(new Event('change', {bubbles: true}));
+                        return 'ok-prefix:' + (s.id || s.name) + '=' + opt.text;
+                    }
+                }
+                return 'not-found:' + val;
+            }""",
+            [dropdown_value],
+        )
+        print(f"[Acuity] Stories dropdown result: {set_stories}")
 
         # Click Next — should advance to Premium Summary
-        await page.click("input[value='Next'], button:has-text('Next')")
+        await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
         await page.wait_for_timeout(5000)
-        logger.info("[Acuity] General Info complete — advancing to Premium Summary.")
+        print("[Acuity] General Info done.")
 
     # ----- Premium Summary (STOP HERE) -----
 
     async def _scrape_premium(self, page: Page) -> Optional[Decimal]:
         """Scrape the premium from the Premium Summary page. Do NOT bind."""
-        logger.info("[Acuity] Scraping Premium Summary...")
+        title = await page.title()
+        print(f"[Acuity] _scrape_premium — page: '{title}'")
 
-        try:
-            await page.wait_for_selector("text=Your quote is ready to bind", timeout=30_000)
-        except PlaywrightTimeout:
-            logger.warning("[Acuity] Did not reach 'ready to bind' — may need manual intervention.")
-            return None
+        # Wait for a premium-summary indicator — try multiple possible texts
+        ready_selectors = [
+            "text=Your quote is ready to bind",
+            "text=ready to bind",
+            "text=Premium Summary",
+            "text=Annual Premium",
+            "text=Total Premium",
+        ]
+        found_summary = False
+        for sel in ready_selectors:
+            try:
+                await page.wait_for_selector(sel, timeout=15_000)
+                print(f"[Acuity] Premium page confirmed via: {sel}")
+                found_summary = True
+                break
+            except PlaywrightTimeout:
+                continue
 
-        # Scrape the headline premium
-        try:
-            premium_el = page.locator("text=/Premium.*\\$/").first
-            premium_text = await premium_el.text_content()
-            match = re.search(r"\$([\d,]+\.\d{2})", premium_text or "")
-            if match:
-                premium = Decimal(match.group(1).replace(",", ""))
-                logger.info("[Acuity] Premium = $%s", premium)
+        if not found_summary:
+            logger.warning("[Acuity] Did not confirm premium page — scraping best-effort.")
 
-                # Also log terrorism coverage options
-                try:
-                    include_el = page.locator("text=/Include Terrorism.*\\$/").first
-                    include_text = await include_el.text_content()
-                    logger.info("[Acuity] %s", include_text)
-                except Exception:
-                    pass
+        # Dump full page text for diagnostics
+        page_text = await page.evaluate("document.body.innerText")
+        print(f"[Acuity] Premium page text (first 600 chars): {page_text[:600]}")
 
-                try:
-                    exclude_el = page.locator("text=/Exclude Terrorism.*\\$/").first
-                    exclude_text = await exclude_el.text_content()
-                    logger.info("[Acuity] %s", exclude_text)
-                except Exception:
-                    pass
+        # Try to find a dollar amount using TreeWalker to scan all text nodes
+        premium_js = await page.evaluate("""() => {
+            // Walk all text nodes and find dollar amounts
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            const results = [];
+            let node;
+            while ((node = walker.nextNode())) {
+                const txt = node.textContent.trim();
+                // Match dollar amounts like $1,234.00 or $1,234
+                const m = txt.match(/\\$([\\d,]+(?:\\.\\d{2})?)/);
+                if (m) {
+                    // Include the parent label for context
+                    const label = node.parentElement ? node.parentElement.textContent.trim().slice(0, 80) : '';
+                    results.push({amount: m[1], context: label});
+                }
+            }
+            return results;
+        }""")
+        print(f"[Acuity] Dollar amounts on premium page: {premium_js}")
 
-                return premium
-        except Exception:
-            logger.warning("[Acuity] Could not parse premium amount.")
+        # Look for the headline annual premium — prefer amounts near "Annual" or "Total" labels
+        def _parse_decimal(s: str) -> Optional[Decimal]:
+            try:
+                return Decimal(s.replace(",", ""))
+            except Exception:
+                return None
 
+        # Strategy 1: context-aware — find amount next to "Annual" or "Total" keyword
+        for item in premium_js:
+            ctx = item.get("context", "").lower()
+            if any(kw in ctx for kw in ("annual", "total", "premium")):
+                val = _parse_decimal(item["amount"])
+                if val and val > 100:
+                    print(f"[Acuity] Premium (context match): ${val}")
+                    return val
+
+        # Strategy 2: largest dollar amount on page (usually the headline premium)
+        amounts = [_parse_decimal(i["amount"]) for i in premium_js]
+        amounts = [a for a in amounts if a and a > 100]
+        if amounts:
+            premium = max(amounts)
+            print(f"[Acuity] Premium (largest amount): ${premium}")
+            return premium
+
+        logger.warning("[Acuity] Could not parse premium amount from page.")
         return None

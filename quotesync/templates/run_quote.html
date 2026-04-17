@@ -41,6 +41,20 @@
         <p class="hint">Configure credentials in <code>.env</code> to enable carriers.</p>
     </fieldset>
 
+    <details class="resume-section">
+        <summary class="hint">Resume from step (optional — for debugging)</summary>
+        <div class="form-group" style="margin-top:0.5rem">
+            <input type="text" name="resume_from" placeholder="e.g. building, location, premium"
+                   style="width:100%;max-width:320px">
+            <p class="hint" style="margin-top:0.25rem">
+                Leave blank for a fresh run. Valid steps:
+                policy_dropdowns, nature_of_business, named_insured, save_dialog,
+                dun_bradstreet, line_selection, location, building, unit_options,
+                policy_options, additional_interests, additional_info, general_info, premium.
+            </p>
+        </div>
+    </details>
+
     <div class="form-actions">
         <button type="submit" class="btn btn-primary btn-lg">Run Quote</button>
     </div>
@@ -78,7 +92,7 @@
                 <td>{{ run.carrier_name }}</td>
                 <td>
                     {% if run.status == 'running' %}
-                    <span class="status-badge status-running">Running</span>
+                    <span class="status-badge status-running">Running…</span>
                     {% elif run.status == 'completed' %}
                     {% if run.premium %}
                     <span class="status-badge status-completed">{{ run.premium }}</span>
@@ -101,5 +115,13 @@
         </tbody>
     </table>
 </fieldset>
+
+{% set has_running = runs.values() | selectattr('status', 'equalto', 'running') | list | length > 0 %}
+{% if has_running %}
+<script>
+  // Auto-refresh every 5 seconds while a run is active
+  setTimeout(function() { location.reload(); }, 5000);
+</script>
+{% endif %}
 {% endif %}
 {% endblock %}

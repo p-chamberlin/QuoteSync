@@ -39,12 +39,22 @@ def _profile_path(adapter: CarrierAdapter) -> Path:
     return profile
 
 
-async def run_carrier(adapter: CarrierAdapter, profile: ProspectProfile, headed: bool = True) -> dict | None:
+async def run_carrier(
+    adapter: CarrierAdapter,
+    profile: ProspectProfile,
+    headed: bool = True,
+    resume_from: str | None = None,
+) -> dict | None:
     """Run a single carrier adapter against a prospect profile.
 
     Opens a persistent Chrome profile so the session survives between runs.
     If the site requires login (session expired or first run), adapter.login()
     is called; otherwise it is skipped.
+
+    resume_from: step name to resume from (adapter-specific).  When set,
+    navigate_to_new_quote is skipped and the adapter resumes an in-progress
+    quote at the named step.  Use during development to skip already-working
+    steps when iterating on a later step.
     """
     async with async_playwright() as pw:
         profile_dir = _profile_path(adapter)
@@ -55,6 +65,8 @@ async def run_carrier(adapter: CarrierAdapter, profile: ProspectProfile, headed:
         page = await context.new_page()
 
         print(f"[QuoteSync] Starting: {adapter.name}")
+        if resume_from:
+            print(f"[QuoteSync] Resume mode — starting from step: {resume_from}")
 
         try:
             # Navigate to the login URL and wait for the OIDC redirect chain to fully settle.
@@ -86,8 +98,20 @@ async def run_carrier(adapter: CarrierAdapter, profile: ProspectProfile, headed:
             else:
                 print(f"[QuoteSync] Session valid — skipping login for {adapter.name}")
 
-            await adapter.navigate_to_new_quote(page)
-            result = await adapter.fill_quote(page, profile)
+            if resume_from:
+                # Let the adapter navigate to its in-progress quote instead of starting new
+                await adapter.navigate_to_saved_quote(page)
+            else:
+                await adapter.navigate_to_new_quote(page)
+
+            # Pass resume_from to fill_quote only if the adapter supports it
+            import inspect
+            sig = inspect.signature(adapter.fill_quote)
+            if "resume_from" in sig.parameters:
+                result = await adapter.fill_quote(page, profile, resume_from=resume_from)
+            else:
+                result = await adapter.fill_quote(page, profile)
+
             print(f"[QuoteSync] Completed: {adapter.name}")
             return result or {}
 

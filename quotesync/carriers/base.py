@@ -38,6 +38,14 @@ class CarrierAdapter(ABC):
     async def navigate_to_new_quote(self, page: Page) -> None:
         """Navigate from the dashboard to the 'start new quote' form."""
 
+    async def navigate_to_saved_quote(self, page: Page) -> None:
+        """Navigate to an in-progress/saved quote for resume mode.
+
+        Default implementation falls back to navigate_to_new_quote.
+        Carriers that support saved-quote retrieval should override this.
+        """
+        await self.navigate_to_new_quote(page)
+
     @abstractmethod
     async def fill_quote(self, page: Page, profile: ProspectProfile) -> dict | None:
         """Fill in the quote form using the prospect profile data.

@@ -150,12 +150,16 @@ def run_quote_start():
         "premium": None,
     }
 
+    resume_from = request.form.get("resume_from") or None
+
     # Launch in background thread
     def _run():
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(run_carrier(adapter, profile, headed=True))
+            result = loop.run_until_complete(
+                run_carrier(adapter, profile, headed=True, resume_from=resume_from)
+            )
             _quote_runs[run_id]["status"] = "completed"
             _quote_runs[run_id]["premium"] = (result or {}).get("premium")
             logger.info("Quote run completed: %s", run_id)
