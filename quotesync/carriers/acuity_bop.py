@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 STEPS = [
     "policy_dropdowns",
     "nature_of_business",
+    "class_questions",
     "named_insured",
     "save_dialog",
     "dun_bradstreet",
@@ -645,10 +646,19 @@ class AcuityBopAdapter(CarrierAdapter):
 
         # Click Next to proceed to Nature of Business
         await page.evaluate("() => { document.getElementById('nextButton')?.click(); }")
-        await page.wait_for_load_state("domcontentloaded")
+        # wait_for_load_state("domcontentloaded") can resolve mid-redirect, destroying the
+        # execution context before page.title() runs.  Use "load" + a retry instead.
+        try:
+            await page.wait_for_load_state("load", timeout=15000)
+        except Exception:
+            pass
         await page.wait_for_timeout(2000)
 
-        title = await page.title()
+        try:
+            title = await page.title()
+        except Exception:
+            await page.wait_for_timeout(2000)
+            title = await page.title()
         if "Policy Selection" in title:
             print(f"[Acuity] WARNING: Still on Policy Selection ('{title}').")
         else:
@@ -699,6 +709,11 @@ class AcuityBopAdapter(CarrierAdapter):
             await self._fill_nature_of_business(p, profile)
         else:
             _skip("nature_of_business")
+
+        if _should_run("class_questions"):
+            await self._fill_class_questions(p, profile)
+        else:
+            _skip("class_questions")
 
         if _should_run("named_insured"):
             await self._fill_named_insured(p, profile)
@@ -860,13 +875,18 @@ class AcuityBopAdapter(CarrierAdapter):
 
         await page.wait_for_timeout(2000)
 
-        # Helper: try to click first result, return True on success
+        # Helper: click first result — results render as radio buttons, not links
         async def _click_first_result() -> bool:
-            try:
-                await nob.locator("table a, td a").first.click(timeout=5000)
-                return True
-            except PlaywrightTimeout:
-                return False
+            for sel in ["input[type='radio']", "table a, td a"]:
+                try:
+                    loc = nob.locator(sel).first
+                    if await loc.count() > 0:
+                        await loc.click(timeout=3000)
+                        print(f"[Acuity] Result selected via: {sel}")
+                        return True
+                except Exception:
+                    pass
+            return False
 
         # Helper: search with a given description term
         async def _search_desc(term: str) -> None:
@@ -879,14 +899,55 @@ class AcuityBopAdapter(CarrierAdapter):
                     pass
             await nob.locator("input[name='noboDescription']").press("Enter")
 
+        # Helper: select from Business Type dropdown and search — this is how the
+        # Acuity NofB dialog actually works (dropdown filters the class list, not description)
+        async def _search_by_business_type(term: str) -> bool:
+            try:
+                sel_elem = nob.locator("select")
+                options: list[str] = await sel_elem.locator("option").all_text_contents()
+                term_lower = term.lower()
+                match = next(
+                    (o for o in options if o.strip() and
+                     (term_lower in o.lower() or o.lower().strip() in term_lower)),
+                    None,
+                )
+                if not match:
+                    print(f"[Acuity] No Business Type option matches '{term}' — options: {options[:10]}")
+                    return False
+                await sel_elem.select_option(label=match)
+                print(f"[Acuity] Business Type selected: '{match}'")
+                await page.wait_for_timeout(500)
+                for btn in ["input[value='Search']", "input[type='submit']"]:
+                    try:
+                        await nob.locator(btn).first.click(timeout=2000)
+                        break
+                    except Exception:
+                        pass
+                await page.wait_for_timeout(2000)
+                return True
+            except Exception as e:
+                print(f"[Acuity] Business Type dropdown error: {e}")
+                return False
+
         search_label = naics_code or gl_code or desc_term
         if not await _click_first_result():
-            # No results — try first word only (e.g. "apartment complex" → "apartment")
-            if desc_term and " " in desc_term:
-                retry_term = desc_term.split()[0]
-                print(f"[Acuity] No results for '{search_label}' — retrying with '{retry_term}'")
-                await _search_desc(retry_term)
+            # Description search returned nothing — try Business Type dropdown (primary Acuity workflow)
+            if desc_term:
+                print(f"[Acuity] No results for '{search_label}' — trying Business Type dropdown")
+                await _search_by_business_type(desc_term)
                 await page.wait_for_timeout(2000)
+
+            if not await _click_first_result():
+                # Try first word of description as Business Type
+                if desc_term and " " in desc_term:
+                    retry_term = desc_term.split()[0]
+                    print(f"[Acuity] Retrying Business Type with first word: '{retry_term}'")
+                    await _search_by_business_type(retry_term)
+                    await page.wait_for_timeout(2000)
+                elif desc_term:
+                    # Try description search fallback with first word
+                    await _search_desc(desc_term.split()[0])
+                    await page.wait_for_timeout(2000)
 
             if not await _click_first_result():
                 print(f"[Acuity] No results — waiting 120s for manual class selection.")
@@ -899,12 +960,11 @@ class AcuityBopAdapter(CarrierAdapter):
                     return s.display !== 'none' && s.visibility !== 'hidden';
                 }""")
                 if modal_still_open:
-                    # Try clicking first result one more time in case results loaded
                     if not await _click_first_result():
                         print("[Acuity] WARNING: No class selected after 120s — proceeding anyway. "
                               "Quote may fail validation.")
             else:
-                print(f"[Acuity] Selected first class code result (retry)")
+                print(f"[Acuity] Selected first class code result")
                 await page.wait_for_timeout(1500)
         else:
             print(f"[Acuity] Selected first class code result for '{search_label}'")
@@ -963,11 +1023,193 @@ class AcuityBopAdapter(CarrierAdapter):
         # Wait a beat for user to review/fill any remaining questions
         await page.wait_for_timeout(5000)
 
+    # ----- Page: Plan/Line Questions (habitational class-specific) -----
+
+    async def _fill_class_questions(self, page: Page, profile: ProspectProfile) -> None:
+        """Fill the habitational Plan/Line Questions page that appears between
+        Nature of Business and Named Insured for apartment/habitational classes.
+
+        Most answers are hardcoded Acuity-safe defaults:
+        - Exclusion questions (Yes → risk declined) are answered "No"
+        - Code-baseline questions are answered to match universal apartment code
+        - Amenities / fireplace exposures default to "None"
+
+        Prospect-specific answers (monthlyRent, studentHousing, assistedLiving,
+        seasonalOrShortTerm, tenantInsurance, smokingAllowed, amenities) are
+        TODO(habitational) until a ProspectProfile sub-model is added.
+        """
+        title = await page.title()
+        print(f"[Acuity CQ] _fill_class_questions — page: '{title}'")
+
+        # Guard: only run when the class-questions page is actually visible.
+        # less100Amp is the first widget on the page — if it isn't present, skip.
+        marker_count = await page.locator("[widgetid='less100Amp']").count()
+        if not marker_count:
+            print("[Acuity CQ] less100Amp marker not found — class-questions page not active, skipping.")
+            return
+
+        await page.wait_for_timeout(1000)
+
+        # Description of Operations (free text)
+        desc = (profile.operations_description or "Apartment buildings").strip()[:200]
+        try:
+            await page.fill("#descriptionOfOperations", desc, timeout=3000)
+            print(f"[Acuity CQ] descriptionOfOperations: '{desc}'")
+        except Exception as e:
+            print(f"[Acuity CQ] descriptionOfOperations fill failed: {e}")
+
+        # Yes/No questions — Dijit yesNoButtons widgets.
+        # First try dijit.byId(wid).set('value', bool); fall back to DOM click
+        # walking up from the matched text leaf to a .dijitButton ancestor.
+        yn_defaults = {
+            "less100Amp": "No",              # Exclusion: <100A service is unacceptable
+            "structureBuiltForHuman": "Yes", # Code baseline for habitational
+            "studentHousing": "No",          # TODO(habitational): prospect-specific
+            "assistedLiving": "No",          # TODO(habitational): prospect-specific
+            "seasonalOrShortTerm": "No",     # TODO(habitational): prospect-specific
+            "grillsPermitted": "No",         # Exclusion: grills on balconies unacceptable
+            "unrepairedRoof": "No",          # Exclusion: unrepaired damage unacceptable
+            "tenantInsurance": "Yes",        # Default: agency requires tenants to carry HO-4
+            "smokingAllowed": "No",          # TODO(habitational): prospect-specific
+            "twoMeansEgress": "Yes",         # Code baseline for habitational
+        }
+        for widget_id, answer in yn_defaults.items():
+            try:
+                widget = page.locator(f"[widgetid='{widget_id}']").first
+                btn = widget.locator(
+                    f"button:has-text('{answer}'), "
+                    f"[role='button']:has-text('{answer}')"
+                ).first
+                await btn.click(timeout=5000)
+                print(f"[Acuity CQ] {widget_id} → '{answer}': clicked")
+            except Exception as e:
+                html = await page.evaluate(
+                    f"() => document.querySelector(\"[widgetid='{widget_id}']\")?.innerHTML?.slice(0,300) ?? 'not-found'"
+                )
+                print(f"[Acuity CQ] {widget_id} → '{answer}' FAILED: {e}")
+                print(f"[Acuity CQ] {widget_id} markup: {html}")
+
+        # Monthly rent — required text input, no schema field yet
+        monthly_rent = "1500"  # TODO(habitational): source from profile.retail_habitational
+        try:
+            await page.fill("#monthlyRent", monthly_rent, timeout=3000)
+            print(f"[Acuity CQ] monthlyRent: '{monthly_rent}' (hardcoded default)")
+        except Exception as e:
+            print(f"[Acuity CQ] monthlyRent fill failed: {e}")
+
+        # Amenities group        — check "None"             (APQ0053)
+        # Fireplace exposures    — check "None"             (APQ0059)
+        # Smoke detectors        — check "Battery operated" (APQ0062) — always-present default
+        for cb_id, label in [
+            ("APQ0053__", "None (amenities)"),
+            ("APQ0059__", "None (fireplace exposures)"),
+            ("APQ0062__", "Battery operated (smoke detectors)"),
+        ]:
+            result = await page.evaluate(
+                """(id) => {
+                    const el = document.getElementById(id);
+                    if (!el) return 'not-found';
+                    if (!el.checked) el.click();
+                    return el.checked ? 'checked' : 'failed';
+                }""",
+                cb_id,
+            )
+            print(f"[Acuity CQ] {cb_id} — {label}: {result}")
+
+            # After checking "Battery operated", check the Semi-annually sub-question.
+            if cb_id == "APQ0062__" and result in ("checked", "already-checked"):
+                await page.wait_for_timeout(500)
+                semi_result = await page.evaluate(
+                    """() => {
+                        const el = document.getElementById('APQ0065__');
+                        if (!el) return 'not-found';
+                        if (!el.checked) el.click();
+                        return el.checked ? 'checked' : 'failed';
+                    }"""
+                )
+                print(f"[Acuity CQ] APQ0065__ — Semi-annually: {semi_result}")
+
+        # Circuit protection / wiring dropdown (APQ0067__) — required select.
+        # Default to "Circuit breakers" (universal in modern apartments).
+        cb_result = await page.evaluate(
+            """(target) => {
+                const inp = document.getElementById('APQ0067__');
+                if (!inp) return 'no-input';
+                // Find the enclosing Dijit widget and click to open the popup
+                const widget = inp.closest('[widgetid]') || inp.parentElement;
+                if (widget) widget.click();
+                return 'opened';
+            }""",
+            "Circuit breakers",
+        )
+        print(f"[Acuity CQ] APQ0067 trigger: {cb_result}")
+        await page.wait_for_timeout(500)
+        pick_result = await page.evaluate(
+            """(target) => {
+                const norm = s => (s || '').trim().toLowerCase();
+                const t = norm(target);
+                const containers = document.querySelectorAll(
+                    '.dijitPopup, .dijitSelectMenu, .dijitMenu, [role="listbox"], .dijitComboBoxMenu'
+                );
+                for (const c of containers) {
+                    const walker = document.createTreeWalker(c, NodeFilter.SHOW_ELEMENT);
+                    let n;
+                    while ((n = walker.nextNode())) {
+                        if (n.childElementCount > 0) continue;
+                        const nt = norm(n.textContent);
+                        if (nt === t || nt.startsWith(t) || nt.includes(t)) {
+                            const r = n.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {
+                                n.click();
+                                return 'ok:' + n.textContent.trim().slice(0, 40);
+                            }
+                        }
+                    }
+                }
+                return 'not-found';
+            }""",
+            "Circuit breakers",
+        )
+        print(f"[Acuity CQ] APQ0067 pick 'Circuit breakers': {pick_result}")
+
+        # Habitational pre-bind acknowledgment checkbox
+        result = await page.evaluate(
+            """() => {
+                const el = document.getElementById('habRiskPreBindCheckBox');
+                if (!el) return 'not-found';
+                if (!el.checked) el.click();
+                return el.checked ? 'checked' : 'failed';
+            }"""
+        )
+        print(f"[Acuity CQ] habRiskPreBindCheckBox: {result}")
+
+        await page.wait_for_timeout(800)
+
+        next_result = await page.evaluate("""() => {
+            const b = document.getElementById('nextButton');
+            if (b) { b.click(); return 'ok'; }
+            return 'not-found';
+        }""")
+        print(f"[Acuity CQ] Next click -> {next_result}")
+        await page.wait_for_timeout(3000)
+
+        logger.info("[Acuity] Class Questions complete.")
+
     # ----- Page: Named Insured -----
 
     async def _fill_named_insured(self, page: Page, profile: ProspectProfile) -> None:
         """Fill the Named Insured and address page."""
         logger.info("[Acuity] Filling Named Insured...")
+
+        # Guard: if class-questions widgets are still visible, the previous step
+        # didn't advance. Fail loudly rather than silently filling nothing.
+        still_on_cq = await page.locator("[widgetid='less100Amp']").count()
+        if still_on_cq:
+            raise RuntimeError(
+                "[Acuity] _fill_named_insured called while Plan/Line Questions page "
+                "is still active (less100Amp widget visible). The class_questions "
+                "step failed to advance — check its logs above."
+            )
 
         # ── Wait for Named Insured page to be active ────────────────────────
         # Acuity loads all pages simultaneously; after NofB Next, the NI content
@@ -1127,14 +1369,7 @@ class AcuityBopAdapter(CarrierAdapter):
                 except Exception:
                     pass
 
-        # ── Phone ────────────────────────────────────────────────────────────
-        if hasattr(profile, "phone") and profile.phone:
-            try:
-                await page.fill("#phoneNbr", profile.phone, timeout=3000)
-                print(f"[Acuity NI] phone filled")
-            except Exception:
-                pass
-
+        await self._fill_ni_contact_and_business(page, profile)
         await page.wait_for_timeout(500)
 
         # ── Click Next via JS (same pattern as NofB) ─────────────────────────
@@ -1151,6 +1386,131 @@ class AcuityBopAdapter(CarrierAdapter):
 
         await page.wait_for_timeout(3000)
         logger.info("[Acuity] Named Insured complete.")
+
+    async def _fill_ni_contact_and_business(self, page: Page, profile: ProspectProfile) -> None:
+        """Fill Business Phone, General Contact, Email, FEIN, employees, Owner on NI page."""
+
+        # Business Phone — split 10 digits into (area, prefix, line).
+        # Fallback to Allen Insurance agency line if profile.contact_phone is empty.
+        def _split_phone(raw: str):
+            digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+            if len(digits) == 11 and digits.startswith("1"):
+                digits = digits[1:]
+            if len(digits) != 10:
+                return None
+            return digits[:3], digits[3:6], digits[6:]
+
+        phone_parts = _split_phone(profile.contact_phone) or _split_phone("2072364311")
+        area, pre, line = phone_parts
+        try:
+            await page.fill("#busareacode", area, timeout=3000)
+            await page.fill("#busphonenbr1", pre, timeout=3000)
+            await page.fill("#busphonenbr2", line, timeout=3000)
+            print(f"[Acuity NI] business phone: ({area}) {pre}-{line}")
+        except Exception as e:
+            print(f"[Acuity NI] business phone FAILED: {e}")
+
+        # General Business Contact name
+        first = (profile.first_name or "").strip()
+        last = (profile.last_name or "").strip()
+        if not first and profile.contact_name:
+            parts = profile.contact_name.strip().split(None, 1)
+            first = parts[0]
+            last = parts[1] if len(parts) > 1 else last
+        if first:
+            try:
+                await page.fill("#genBusContactFirstName", first, timeout=3000)
+                print(f"[Acuity NI] contact first name: '{first}'")
+            except Exception as e:
+                print(f"[Acuity NI] contact first name FAILED: {e}")
+        if last:
+            try:
+                await page.fill("#genBusContactLastName", last, timeout=3000)
+                print(f"[Acuity NI] contact last name: '{last}'")
+            except Exception as e:
+                print(f"[Acuity NI] contact last name FAILED: {e}")
+
+        # Cell Phone → always "Same as Business"
+        try:
+            result = await page.evaluate(
+                """() => {
+                    const el = document.getElementById('genBusContactPhoneSame');
+                    if (!el) return 'not-found';
+                    if (!el.checked) el.click();
+                    return el.checked ? 'checked' : 'failed';
+                }"""
+            )
+            print(f"[Acuity NI] cell phone Same as Business: {result}")
+        except Exception as e:
+            print(f"[Acuity NI] cell phone FAILED: {e}")
+
+        # Email — fill from profile, else check None Available
+        if profile.contact_email:
+            try:
+                await page.fill("#genBusContactEmail", profile.contact_email, timeout=3000)
+                print(f"[Acuity NI] email: '{profile.contact_email}'")
+            except Exception as e:
+                print(f"[Acuity NI] email FAILED: {e}")
+        else:
+            try:
+                result = await page.evaluate(
+                    """() => {
+                        const el = document.getElementById('genBusContactEmailNone');
+                        if (!el) return 'not-found';
+                        if (!el.checked) el.click();
+                        return el.checked ? 'checked' : 'failed';
+                    }"""
+                )
+                print(f"[Acuity NI] email None: {result}")
+            except Exception as e:
+                print(f"[Acuity NI] email None FAILED: {e}")
+
+        # Business Information: FEIN, year started, employees
+        if profile.fein:
+            fein_digits = "".join(ch for ch in profile.fein if ch.isdigit())
+            try:
+                await page.fill("#fedIdSocSecNbr", fein_digits, timeout=3000)
+                print(f"[Acuity NI] FEIN: '{fein_digits}'")
+            except Exception as e:
+                print(f"[Acuity NI] FEIN FAILED: {e}")
+        if profile.year_established:
+            try:
+                await page.fill("#yearstarted", str(profile.year_established), timeout=3000)
+                print(f"[Acuity NI] year started: {profile.year_established}")
+            except Exception as e:
+                print(f"[Acuity NI] year started FAILED: {e}")
+        try:
+            await page.fill("#nbrFullTimeEmp", str(profile.num_employees_ft or 0), timeout=3000)
+            await page.fill("#nbrPartTimeEmp", str(profile.num_employees_pt or 0), timeout=3000)
+            print(f"[Acuity NI] employees: FT={profile.num_employees_ft or 0}, PT={profile.num_employees_pt or 0}")
+        except Exception as e:
+            print(f"[Acuity NI] employees FAILED: {e}")
+
+        # Business Owner: name + Same as Insured address
+        if first:
+            try:
+                await page.fill("#busOwnerFirstName", first, timeout=3000)
+                print(f"[Acuity NI] owner first name: '{first}'")
+            except Exception as e:
+                print(f"[Acuity NI] owner first name FAILED: {e}")
+        if last:
+            try:
+                await page.fill("#busOwnerLastName", last, timeout=3000)
+                print(f"[Acuity NI] owner last name: '{last}'")
+            except Exception as e:
+                print(f"[Acuity NI] owner last name FAILED: {e}")
+        try:
+            result = await page.evaluate(
+                """() => {
+                    const el = document.getElementById('busOwnerAddressSameAsIns');
+                    if (!el) return 'not-found';
+                    if (!el.checked) el.click();
+                    return el.checked ? 'checked' : 'failed';
+                }"""
+            )
+            print(f"[Acuity NI] owner Same as Insured: {result}")
+        except Exception as e:
+            print(f"[Acuity NI] owner Same as Insured FAILED: {e}")
 
     # ----- Save New Copy dialog -----
 
@@ -1177,8 +1537,16 @@ class AcuityBopAdapter(CarrierAdapter):
         """Handle the D&B search results page — skip or let it auto-match."""
         logger.info("[Acuity] Checking for D&B search results...")
         try:
-            # Look for D&B results table or skip button
-            skip_btn = page.locator("input[value*='Skip'], input[value*='None'], button:has-text('Skip'), button:has-text('None of the Above')")
+            # Only actual submit buttons labeled Skip / None of the Above —
+            # avoid matching 'value*=\"None\"' which collides with Suffix='None' textboxes.
+            skip_btn = page.locator(
+                "input[type='submit'][value='Skip'], "
+                "input[type='button'][value='Skip'], "
+                "input[type='submit'][value='None of the Above'], "
+                "input[type='button'][value='None of the Above'], "
+                "button:has-text('Skip'), "
+                "button:has-text('None of the Above')"
+            ).first
             await skip_btn.wait_for(timeout=5000)
             await skip_btn.click()
             await page.wait_for_timeout(2000)
