@@ -88,3 +88,9 @@ When iterating on a late step (e.g. Acuity's premium page), rerunning from step 
 - MMG uses Angular custom dropdowns; Acuity iRating uses legacy Dojo/Dijit widgets. They need completely different interaction patterns. See the feedback memory `feedback_acuity_debugging.md` for the Dijit-specific pitfalls before touching Acuity.
 - `example_carrier.py` is a template — selectors are placeholders, not a working adapter.
 - Default to `headed=True` during development. The user watches the browser to spot regressions and intervene for MFA.
+
+## Git workflow
+
+- **Commit after each carrier step advances successfully.** Adapter steps (e.g. Acuity's `class_questions`, MMG's Step 4→5) are paid for with manual portal inspection; they're hard-won and easy to regress. Commit the moment a step advances to the next page end-to-end so we always have a working baseline to bisect back to.
+- Keep commit messages scoped to one step or one bug fix — don't bundle unrelated changes.
+- Still ask before committing and before pushing, per default git safety rules.
