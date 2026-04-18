@@ -1515,21 +1515,43 @@ class AcuityBopAdapter(CarrierAdapter):
     # ----- Save New Copy dialog -----
 
     async def _handle_save_dialog(self, page: Page, profile: ProspectProfile) -> None:
-        """Handle the 'Save New Copy' dialog that appears after Named Insured."""
+        """Handle the 'Save Name Entry' dialog that appears after Named Insured.
+
+        Marker: the dialog has #continueButton (name=performSave, value=Continue).
+        Acuity pre-fills Save Name with the legal business name, so we just click
+        Continue. We also read back the current save name for resume_from state.
+        """
         logger.info("[Acuity] Checking for Save Name dialog...")
         try:
-            save_input = page.locator("input[name*='aveName'], input[name*='quoteName'], input[id*='save']")
-            await save_input.wait_for(timeout=5000)
-            # Auto-generate a save name from the insured name + date
-            save_name = f"{profile.legal_business_name or profile.last_name} BOP {date.today().isoformat()}"
-            await save_input.fill(save_name)
-            await page.click("input[value='Save'], button:has-text('Save'), input[value='OK']")
-            await page.wait_for_timeout(3000)
-            logger.info("[Acuity] Quote saved as '%s'", save_name)
-            # Persist for resume_from support
-            _save_state({"last_quote_name": save_name})
+            await page.wait_for_selector("#continueButton", timeout=15000)
         except PlaywrightTimeout:
             logger.info("[Acuity] No Save dialog appeared — continuing.")
+            return
+
+        # Read the pre-filled save name for resume_from persistence.
+        save_name = ""
+        try:
+            save_name = await page.evaluate("""() => {
+                const candidates = document.querySelectorAll(
+                    "input[name*='aveName'], input[id*='aveName'], input[name*='quoteName']"
+                );
+                for (const el of candidates) {
+                    if (el.offsetWidth > 0 && el.value) return el.value;
+                }
+                return '';
+            }""")
+        except Exception:
+            pass
+        if not save_name:
+            save_name = profile.legal_business_name or profile.last_name or "Quote"
+
+        try:
+            await page.evaluate("() => { document.getElementById('continueButton')?.click(); }")
+            await page.wait_for_timeout(3000)
+            logger.info("[Acuity] Save dialog: clicked Continue (save name: '%s')", save_name)
+            _save_state({"last_quote_name": save_name})
+        except Exception as e:
+            logger.info("[Acuity] Save dialog Continue click failed: %s", e)
 
     # ----- D&B Search -----
 
