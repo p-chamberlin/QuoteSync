@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}QuoteSync — Run Quote{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Run Quote</h1>
+</div>
+
+<form method="POST" action="{{ url_for('run_quote_start') }}" class="run-quote-form">
+    <fieldset>
+        <legend>1. Select Prospect</legend>
+        {% if prospects %}
+        <div class="form-group">
+            <select name="prospect" required>
+                <option value="">— Choose a prospect —</option>
+                {% for p in prospects %}
+                <option value="{{ p.filename }}">{{ p.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% else %}
+        <p class="hint">No prospects saved yet. <a href="{{ url_for('new_prospect') }}">Create one first</a>.</p>
+        {% endif %}
+    </fieldset>
+
+    <fieldset>
+        <legend>2. Select Carrier</legend>
+        <div class="carrier-grid">
+            {% for c in carriers %}
+            <label class="carrier-card {% if not c.configured %}carrier-disabled{% endif %}">
+                <input type="radio" name="carrier" value="{{ c.id }}" {% if not c.configured %}disabled{% endif %} required>
+                <span class="carrier-name">{{ c.name }}</span>
+                {% if c.configured %}
+                <span class="carrier-status carrier-ready">Ready</span>
+                {% else %}
+                <span class="carrier-status carrier-missing">No credentials</span>
+                {% endif %}
+            </label>
+            {% endfor %}
+        </div>
+        <p class="hint">Configure credentials in <code>.env</code> to enable carriers.</p>
+    </fieldset>
+
+    <details class="resume-section">
+        <summary class="hint">Resume from step (optional — for debugging)</summary>
+        <div class="form-group" style="margin-top:0.5rem">
+            <input type="text" name="resume_from" placeholder="e.g. building, location, premium"
+                   style="width:100%;max-width:320px">
+            <p class="hint" style="margin-top:0.25rem">
+                Leave blank for a fresh run. Valid steps:
+                policy_dropdowns, nature_of_business, named_insured, save_dialog,
+                dun_bradstreet, line_selection, location, building, unit_options,
+                policy_options, additional_interests, additional_info, general_info, premium.
+            </p>
+        </div>
+    </details>
+
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-lg">Run Quote</button>
+    </div>
+</form>
+
+<div class="session-actions">
+    {% for c in carriers %}
+    {% if c.configured and c.has_session %}
+    <form method="POST" action="{{ url_for('clear_session', carrier_id=c.id) }}" class="inline-form">
+        <button type="submit" class="btn btn-sm btn-warning"
+                title="Force a fresh login next run (use if MFA expired)">
+            Clear saved session: {{ c.name }}
+        </button>
+    </form>
+    {% endif %}
+    {% endfor %}
+</div>
+
+{% if runs %}
+<fieldset class="run-history">
+    <legend>Recent Runs</legend>
+    <table class="prospect-table">
+        <thead>
+            <tr>
+                <th>Prospect</th>
+                <th>Carrier</th>
+                <th>Status</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for run_id, run in runs.items() %}
+            <tr>
+                <td>{{ run.prospect }}</td>
+                <td>{{ run.carrier_name }}</td>
+                <td>
+                    {% if run.status == 'running' %}
+                    <span class="status-badge status-running">Running…</span>
+                    {% elif run.status == 'completed' %}
+                    {% if run.premium %}
+                    <span class="status-badge status-completed">{{ run.premium }}</span>
+                    {% else %}
+                    <span class="status-badge status-completed">Completed</span>
+                    {% endif %}
+                    {% elif run.status == 'error' %}
+                    <span class="status-badge status-error" title="{{ run.error }}">Error</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if run.status != 'running' %}
+                    <form method="POST" action="{{ url_for('run_quote_clear', run_id=run_id) }}" class="inline-form">
+                        <button type="submit" class="btn btn-sm">Clear</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</fieldset>
+
+{% set has_running = runs.values() | selectattr('status', 'equalto', 'running') | list | length > 0 %}
+{% if has_running %}
+<script>
+  // Auto-refresh every 5 seconds while a run is active
+  setTimeout(function() { location.reload(); }, 5000);
+</script>
+{% endif %}
+{% endif %}
+{% endblock %}

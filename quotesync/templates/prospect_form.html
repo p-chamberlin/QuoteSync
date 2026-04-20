@@ -1,0 +1,618 @@
+{% extends "base.html" %}
+{% block title %}QuoteSync — {% if is_new %}New Prospect{% else %}Edit {{ profile.legal_business_name }}{% endif %}{% endblock %}
+
+{% block content %}
+<h1>{% if is_new %}New Prospect Profile{% else %}Edit: {{ profile.legal_business_name }}{% endif %}</h1>
+
+<form method="POST" action="{{ url_for('save_prospect') }}" class="prospect-form">
+    {% if not is_new %}
+    <input type="hidden" name="existing_filename" value="{{ filename }}">
+    {% endif %}
+
+    <!-- SECTION 1: Named Insured & Business Info -->
+    <fieldset>
+        <legend>1. Named Insured & Business Info</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="insured_type">Insured Type</label>
+                <select id="insured_type" name="insured_type">
+                    <option value="">-- Select --</option>
+                    <option value="Individual" {{ 'selected' if profile.insured_type and profile.insured_type.value == 'Individual' }}>Individual</option>
+                    <option value="Organization" {{ 'selected' if profile.insured_type and profile.insured_type.value == 'Organization' }}>Organization</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="legal_business_name">Business / Organization Name</label>
+                <input type="text" id="legal_business_name" name="legal_business_name" value="{{ profile.legal_business_name }}">
+            </div>
+            <div class="form-group">
+                <label for="first_name">First Name</label>
+                <input type="text" id="first_name" name="first_name" value="{{ profile.first_name }}">
+            </div>
+            <div class="form-group">
+                <label for="last_name">Last Name</label>
+                <input type="text" id="last_name" name="last_name" value="{{ profile.last_name }}">
+            </div>
+            <div class="form-group">
+                <label for="date_of_birth">Date of Birth</label>
+                <input type="date" id="date_of_birth" name="date_of_birth" value="{{ profile.date_of_birth or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="dba">DBA (if any)</label>
+                <input type="text" id="dba" name="dba" value="{{ profile.dba }}">
+            </div>
+            <div class="form-group">
+                <label for="fein">FEIN / Tax ID</label>
+                <input type="text" id="fein" name="fein" value="{{ profile.fein }}">
+            </div>
+            <div class="form-group">
+                <label for="entity_type">Entity Type</label>
+                <select id="entity_type" name="entity_type">
+                    <option value="">-- Select --</option>
+                    <option value="Association" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Association' }}>Association</option>
+                    <option value="Common Ownership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Common Ownership' }}>Common Ownership</option>
+                    <option value="Corporation" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Corporation' }}>Corporation</option>
+                    <option value="Executor or Trustee" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Executor or Trustee' }}>Executor or Trustee</option>
+                    <option value="Individual" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Individual' }}>Individual</option>
+                    <option value="Joint Venture" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Joint Venture' }}>Joint Venture</option>
+                    <option value="Limited Liability Company (LLC)" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Limited Liability Company (LLC)' }}>Limited Liability Company (LLC)</option>
+                    <option value="Limited Liability Partnership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Limited Liability Partnership' }}>Limited Liability Partnership</option>
+                    <option value="Limited Partnership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Limited Partnership' }}>Limited Partnership</option>
+                    <option value="Partnership" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Partnership' }}>Partnership</option>
+                    <option value="Other" {{ 'selected' if profile.entity_type and profile.entity_type.value == 'Other' }}>Other</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="year_established">Year Established</label>
+                <input type="number" id="year_established" name="year_established" value="{{ profile.year_established or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="years_in_business">Years in Business</label>
+                <select id="years_in_business" name="years_in_business">
+                    <option value="">-- Select --</option>
+                    <option value="Less than 1 year" {{ 'selected' if profile.years_in_business == 'Less than 1 year' }}>Less than 1 year</option>
+                    <option value="1-3 years" {{ 'selected' if profile.years_in_business == '1-3 years' }}>1-3 years</option>
+                    <option value="4-9 years" {{ 'selected' if profile.years_in_business == '4-9 years' }}>4-9 years</option>
+                    <option value="10+ years" {{ 'selected' if profile.years_in_business == '10+ years' }}>10+ years</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="website">Website</label>
+                <input type="text" id="website" name="website" value="{{ profile.website }}">
+            </div>
+            <div class="form-group">
+                <label for="contact_name">Primary Contact Name</label>
+                <input type="text" id="contact_name" name="contact_name" value="{{ profile.contact_name }}">
+            </div>
+            <div class="form-group">
+                <label for="contact_phone">Phone</label>
+                <input type="tel" id="contact_phone" name="contact_phone" value="{{ profile.contact_phone }}">
+            </div>
+            <div class="form-group">
+                <label for="contact_email">Email</label>
+                <input type="email" id="contact_email" name="contact_email" value="{{ profile.contact_email }}">
+            </div>
+            <div class="form-group">
+                <label for="risk_class">Risk Class</label>
+                <select id="risk_class" name="risk_class">
+                    <option value="">-- Select --</option>
+                    <option value="Contractors/Trades" {{ 'selected' if profile.risk_class and profile.risk_class.value == 'Contractors/Trades' }}>Contractors/Trades</option>
+                    <option value="Retail/Habitational" {{ 'selected' if profile.risk_class and profile.risk_class.value == 'Retail/Habitational' }}>Retail/Habitational</option>
+                    <option value="Professional Services" {{ 'selected' if profile.risk_class and profile.risk_class.value == 'Professional Services' }}>Professional Services</option>
+                    <option value="Manufacturers/Wholesalers" {{ 'selected' if profile.risk_class and profile.risk_class.value == 'Manufacturers/Wholesalers' }}>Manufacturers/Wholesalers</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 2: Mailing & Locations -->
+    <fieldset>
+        <legend>2. Mailing Address</legend>
+        <div class="form-grid">
+            <div class="form-group full-width">
+                <label for="mailing_address.street">Street</label>
+                <input type="text" id="mailing_address.street" name="mailing_address.street" value="{{ profile.mailing_address.street }}">
+            </div>
+            <div class="form-group">
+                <label for="mailing_address.city">City</label>
+                <input type="text" id="mailing_address.city" name="mailing_address.city" value="{{ profile.mailing_address.city }}">
+            </div>
+            <div class="form-group">
+                <label for="mailing_address.state">State</label>
+                <input type="text" id="mailing_address.state" name="mailing_address.state" value="{{ profile.mailing_address.state }}" maxlength="2" placeholder="e.g. NY">
+            </div>
+            <div class="form-group">
+                <label for="mailing_address.zip_code">ZIP Code</label>
+                <input type="text" id="mailing_address.zip_code" name="mailing_address.zip_code" value="{{ profile.mailing_address.zip_code }}">
+            </div>
+            <div class="form-group">
+                <label for="mailing_is_primary_location">Is mailing address the primary location?</label>
+                <select id="mailing_is_primary_location" name="mailing_is_primary_location">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.mailing_is_primary_location == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.mailing_is_primary_location == false }}>No</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 3: Operations -->
+    <fieldset>
+        <legend>3. Operations</legend>
+        <div class="form-grid">
+            <div class="form-group full-width">
+                <label for="operations_description">Description of Operations</label>
+                <textarea id="operations_description" name="operations_description" rows="3">{{ profile.operations_description }}</textarea>
+            </div>
+            <div class="form-group">
+                <label for="sic_naics_code">SIC / NAICS Code</label>
+                <input type="text" id="sic_naics_code" name="sic_naics_code" value="{{ profile.sic_naics_code }}">
+            </div>
+            <div class="form-group">
+                <label for="work_outside_us">Work Outside US?</label>
+                <select id="work_outside_us" name="work_outside_us">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.work_outside_us == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.work_outside_us == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="uses_subcontractors">Uses Subcontractors?</label>
+                <select id="uses_subcontractors" name="uses_subcontractors">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.uses_subcontractors == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.uses_subcontractors == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="pct_work_subcontracted">% Work Subcontracted</label>
+                <input type="number" id="pct_work_subcontracted" name="pct_work_subcontracted" value="{{ profile.pct_work_subcontracted or '' }}" min="0" max="100">
+            </div>
+            <div class="form-group">
+                <label for="requires_sub_certificates">Requires Sub Certificates?</label>
+                <select id="requires_sub_certificates" name="requires_sub_certificates">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.requires_sub_certificates == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.requires_sub_certificates == false }}>No</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 4: Revenue & Payroll -->
+    <fieldset>
+        <legend>4. Revenue & Payroll</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="gross_revenue_current">Gross Revenue (Current Year)</label>
+                <input type="text" id="gross_revenue_current" name="gross_revenue_current" value="{{ profile.gross_revenue_current or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="gross_revenue_prior">Gross Revenue (Prior Year)</label>
+                <input type="text" id="gross_revenue_prior" name="gross_revenue_prior" value="{{ profile.gross_revenue_prior or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="total_annual_payroll">Total Annual Payroll</label>
+                <input type="text" id="total_annual_payroll" name="total_annual_payroll" value="{{ profile.total_annual_payroll or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="num_employees_ft">Full-Time Employees</label>
+                <input type="number" id="num_employees_ft" name="num_employees_ft" value="{{ profile.num_employees_ft or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="num_employees_pt">Part-Time Employees</label>
+                <input type="number" id="num_employees_pt" name="num_employees_pt" value="{{ profile.num_employees_pt or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="num_owners_officers">Owners / Officers</label>
+                <input type="number" id="num_owners_officers" name="num_owners_officers" value="{{ profile.num_owners_officers or '' }}">
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 5: General Liability -->
+    <fieldset>
+        <legend>5. General Liability</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="gl.desired_limits">Desired Limits</label>
+                <select id="gl.desired_limits" name="gl.desired_limits">
+                    <option value="1M/2M" {{ 'selected' if profile.gl.desired_limits == '1M/2M' }}>$1M / $2M</option>
+                    <option value="500K/1M" {{ 'selected' if profile.gl.desired_limits == '500K/1M' }}>$500K / $1M</option>
+                    <option value="2M/4M" {{ 'selected' if profile.gl.desired_limits == '2M/4M' }}>$2M / $4M</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="gl.products_completed_ops">Products/Completed Ops Exposure?</label>
+                <select id="gl.products_completed_ops" name="gl.products_completed_ops">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.gl.products_completed_ops == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.gl.products_completed_ops == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="gl.professional_services_rendered">Professional Services Rendered?</label>
+                <select id="gl.professional_services_rendered" name="gl.professional_services_rendered">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.gl.professional_services_rendered == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.gl.professional_services_rendered == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="gl.residential_vs_commercial_pct">Residential vs Commercial (%)</label>
+                <input type="text" id="gl.residential_vs_commercial_pct" name="gl.residential_vs_commercial_pct" value="{{ profile.gl.residential_vs_commercial_pct }}" placeholder="e.g. 70/30">
+            </div>
+            <div class="form-group">
+                <label for="gl.new_construction_vs_renovation_pct">New Construction vs Renovation (%)</label>
+                <input type="text" id="gl.new_construction_vs_renovation_pct" name="gl.new_construction_vs_renovation_pct" value="{{ profile.gl.new_construction_vs_renovation_pct }}" placeholder="e.g. 60/40">
+            </div>
+            <div class="form-group">
+                <label for="gl.work_over_3_stories">Work Over 3 Stories?</label>
+                <select id="gl.work_over_3_stories" name="gl.work_over_3_stories">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.gl.work_over_3_stories == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.gl.work_over_3_stories == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="gl.xcu_exposure">XCU Exposure?</label>
+                <select id="gl.xcu_exposure" name="gl.xcu_exposure">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.gl.xcu_exposure == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.gl.xcu_exposure == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="gl.liquor_liability">Liquor Liability?</label>
+                <select id="gl.liquor_liability" name="gl.liquor_liability">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.gl.liquor_liability == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.gl.liquor_liability == false }}>No</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 6: Commercial Property / Building -->
+    <fieldset>
+        <legend>6. Commercial Property / Building</legend>
+        <div class="form-grid">
+            <div class="form-group full-width">
+                <label for="property.building_description">Building Description</label>
+                <input type="text" id="property.building_description" name="property.building_description" value="{{ profile.property.building_description }}">
+            </div>
+            <div class="form-group">
+                <label for="property.building_value">Building Limit ($)</label>
+                <input type="text" id="property.building_value" name="property.building_value" value="{{ profile.property.building_value or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="property.bpp_value">Business Personal Property Limit ($)</label>
+                <input type="text" id="property.bpp_value" name="property.bpp_value" value="{{ profile.property.bpp_value or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="property.annual_gross_receipts">Annual Gross Receipts ($)</label>
+                <input type="text" id="property.annual_gross_receipts" name="property.annual_gross_receipts" value="{{ profile.property.annual_gross_receipts or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="property.business_income_limit">Business Income Limit ($)</label>
+                <input type="text" id="property.business_income_limit" name="property.business_income_limit" value="{{ profile.property.business_income_limit or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="property.construction_type">Construction Type</label>
+                <select id="property.construction_type" name="property.construction_type">
+                    <option value="">-- Select --</option>
+                    <option value="Frame" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Frame' }}>Frame</option>
+                    <option value="Joisted Masonry" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Joisted Masonry' }}>Joisted Masonry</option>
+                    <option value="Non-Combustible" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Non-Combustible' }}>Non-Combustible</option>
+                    <option value="Fire Resistive" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Fire Resistive' }}>Fire Resistive</option>
+                    <option value="Modified Fire Resistive" {{ 'selected' if profile.property.construction_type and profile.property.construction_type.value == 'Modified Fire Resistive' }}>Modified Fire Resistive</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="property.occupied_by">Occupied By</label>
+                <select id="property.occupied_by" name="property.occupied_by">
+                    <option value="">-- Select --</option>
+                    <option value="Owner Occupied" {{ 'selected' if profile.property.occupied_by and profile.property.occupied_by.value == 'Owner Occupied' }}>Owner Occupied</option>
+                    <option value="Non owner" {{ 'selected' if profile.property.occupied_by and profile.property.occupied_by.value == 'Non owner' }}>Non owner</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="property.square_footage">Square Footage</label>
+                <input type="number" id="property.square_footage" name="property.square_footage" value="{{ profile.property.square_footage or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.year_built">Year Built</label>
+                <input type="number" id="property.year_built" name="property.year_built" value="{{ profile.property.year_built or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.number_of_stories">Number of Stories</label>
+                <input type="number" id="property.number_of_stories" name="property.number_of_stories" value="{{ profile.property.number_of_stories or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.roof_year_updated">Roof (Year)</label>
+                <input type="number" id="property.roof_year_updated" name="property.roof_year_updated" value="{{ profile.property.roof_year_updated or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.electrical_year_updated">Electrical (Year)</label>
+                <input type="number" id="property.electrical_year_updated" name="property.electrical_year_updated" value="{{ profile.property.electrical_year_updated or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.electrical_amp_service">Electrical - AMP Service</label>
+                <input type="text" id="property.electrical_amp_service" name="property.electrical_amp_service" value="{{ profile.property.electrical_amp_service }}">
+            </div>
+            <div class="form-group">
+                <label for="property.electrical_box_type">Electrical - Box Type</label>
+                <input type="text" id="property.electrical_box_type" name="property.electrical_box_type" value="{{ profile.property.electrical_box_type }}">
+            </div>
+            <div class="form-group">
+                <label for="property.electrical_wiring_type">Electrical - Wiring Type</label>
+                <input type="text" id="property.electrical_wiring_type" name="property.electrical_wiring_type" value="{{ profile.property.electrical_wiring_type }}">
+            </div>
+            <div class="form-group">
+                <label for="property.plumbing_year_updated">Plumbing (Year)</label>
+                <input type="number" id="property.plumbing_year_updated" name="property.plumbing_year_updated" value="{{ profile.property.plumbing_year_updated or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.hvac_year_updated">Heating (Year)</label>
+                <input type="number" id="property.hvac_year_updated" name="property.hvac_year_updated" value="{{ profile.property.hvac_year_updated or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="property.heating_service">Heating Service Type</label>
+                <input type="text" id="property.heating_service" name="property.heating_service" value="{{ profile.property.heating_service }}">
+            </div>
+            <div class="form-group">
+                <label for="property.sprinklered">Automatic Sprinkler System?</label>
+                <select id="property.sprinklered" name="property.sprinklered">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.property.sprinklered == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.property.sprinklered == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="property.fire_extinguishers">Fire Extinguishers?</label>
+                <select id="property.fire_extinguishers" name="property.fire_extinguishers">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.property.fire_extinguishers == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.property.fire_extinguishers == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="property.smoke_detectors">Smoke Detectors?</label>
+                <select id="property.smoke_detectors" name="property.smoke_detectors">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.property.smoke_detectors == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.property.smoke_detectors == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="property.security_cameras">Security Cameras?</label>
+                <select id="property.security_cameras" name="property.security_cameras">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.property.security_cameras == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.property.security_cameras == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group full-width">
+                <label for="property.business_owner_class">Business Owner Class (ISO Code)</label>
+                <input type="text" id="property.business_owner_class" name="property.business_owner_class" value="{{ profile.property.business_owner_class }}" placeholder="e.g. Office - Professional">
+            </div>
+            <div class="form-group full-width">
+                <label for="property.mortgagee_name">Mortgagee / Loss Payee Name</label>
+                <input type="text" id="property.mortgagee_name" name="property.mortgagee_name" value="{{ profile.property.mortgagee_name }}">
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 7: Class-Specific — Contractors -->
+    <fieldset class="class-section" id="section-contractor">
+        <legend>7a. Contractors / Trades</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="contractor.trade_type">Trade Type</label>
+                <input type="text" id="contractor.trade_type" name="contractor.trade_type" value="{{ profile.contractor.trade_type }}" placeholder="e.g. General, Electrical, Plumbing">
+            </div>
+            <div class="form-group">
+                <label for="contractor.largest_single_job_value">Largest Single Job Value</label>
+                <input type="text" id="contractor.largest_single_job_value" name="contractor.largest_single_job_value" value="{{ profile.contractor.largest_single_job_value or '' }}" placeholder="$">
+            </div>
+            <div class="form-group">
+                <label for="contractor.pulls_own_permits">Pulls Own Permits?</label>
+                <select id="contractor.pulls_own_permits" name="contractor.pulls_own_permits">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.contractor.pulls_own_permits == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.contractor.pulls_own_permits == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="contractor.works_as_gc_or_sub">Works as GC or Sub?</label>
+                <select id="contractor.works_as_gc_or_sub" name="contractor.works_as_gc_or_sub">
+                    <option value="">-- Select --</option>
+                    <option value="GC" {{ 'selected' if profile.contractor.works_as_gc_or_sub == 'GC' }}>General Contractor</option>
+                    <option value="Sub" {{ 'selected' if profile.contractor.works_as_gc_or_sub == 'Sub' }}>Subcontractor</option>
+                    <option value="Both" {{ 'selected' if profile.contractor.works_as_gc_or_sub == 'Both' }}>Both</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 7b: Retail/Habitational -->
+    <fieldset class="class-section" id="section-retail">
+        <legend>7b. Retail / Habitational</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="retail_habitational.number_of_units">Number of Units</label>
+                <input type="number" id="retail_habitational.number_of_units" name="retail_habitational.number_of_units" value="{{ profile.retail_habitational.number_of_units or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="retail_habitational.swimming_pool">Swimming Pool?</label>
+                <select id="retail_habitational.swimming_pool" name="retail_habitational.swimming_pool">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.retail_habitational.swimming_pool == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.retail_habitational.swimming_pool == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="retail_habitational.hours_of_operation">Hours of Operation</label>
+                <input type="text" id="retail_habitational.hours_of_operation" name="retail_habitational.hours_of_operation" value="{{ profile.retail_habitational.hours_of_operation }}">
+            </div>
+            <div class="form-group">
+                <label for="retail_habitational.food_service">Food Service?</label>
+                <select id="retail_habitational.food_service" name="retail_habitational.food_service">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.retail_habitational.food_service == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.retail_habitational.food_service == false }}>No</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 7c: Professional Services -->
+    <fieldset class="class-section" id="section-professional">
+        <legend>7c. Professional Services</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="professional.service_type">Service Type</label>
+                <input type="text" id="professional.service_type" name="professional.service_type" value="{{ profile.professional.service_type }}">
+            </div>
+            <div class="form-group">
+                <label for="professional.eno_exposure">E&O Exposure?</label>
+                <select id="professional.eno_exposure" name="professional.eno_exposure">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.professional.eno_exposure == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.professional.eno_exposure == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="professional.provides_advice_design_consulting">Provides Advice/Design/Consulting?</label>
+                <select id="professional.provides_advice_design_consulting" name="professional.provides_advice_design_consulting">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.professional.provides_advice_design_consulting == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.professional.provides_advice_design_consulting == false }}>No</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 7d: Manufacturers -->
+    <fieldset class="class-section" id="section-manufacturer">
+        <legend>7d. Manufacturers / Wholesalers</legend>
+        <div class="form-grid">
+            <div class="form-group full-width">
+                <label for="manufacturer.products_manufactured">Products Manufactured / Distributed</label>
+                <input type="text" id="manufacturer.products_manufactured" name="manufacturer.products_manufactured" value="{{ profile.manufacturer.products_manufactured }}">
+            </div>
+            <div class="form-group">
+                <label for="manufacturer.sold_under_own_label">Sold Under Own Label?</label>
+                <select id="manufacturer.sold_under_own_label" name="manufacturer.sold_under_own_label">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.manufacturer.sold_under_own_label == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.manufacturer.sold_under_own_label == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="manufacturer.products_sold_outside_us">Products Sold Outside US?</label>
+                <select id="manufacturer.products_sold_outside_us" name="manufacturer.products_sold_outside_us">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.manufacturer.products_sold_outside_us == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.manufacturer.products_sold_outside_us == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="manufacturer.flammable_hazardous_materials">Flammable/Hazardous Materials?</label>
+                <select id="manufacturer.flammable_hazardous_materials" name="manufacturer.flammable_hazardous_materials">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.manufacturer.flammable_hazardous_materials == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.manufacturer.flammable_hazardous_materials == false }}>No</option>
+                </select>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 8: Underwriting & Loss History -->
+    <fieldset>
+        <legend>8. Underwriting & Loss History</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="currently_insured">Currently Insured?</label>
+                <select id="currently_insured" name="currently_insured">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.currently_insured == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.currently_insured == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="current_carrier">Current Carrier</label>
+                <input type="text" id="current_carrier" name="current_carrier" value="{{ profile.current_carrier }}">
+            </div>
+            <div class="form-group">
+                <label for="continuous_coverage">Maintained Continuous Coverage?</label>
+                <select id="continuous_coverage" name="continuous_coverage">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.continuous_coverage == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.continuous_coverage == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="non_renewals_or_cancellations">Non-Renewals or Cancellations (3 yrs)?</label>
+                <select id="non_renewals_or_cancellations" name="non_renewals_or_cancellations">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.non_renewals_or_cancellations == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.non_renewals_or_cancellations == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="convicted_of_felony">Convicted of a Felony?</label>
+                <select id="convicted_of_felony" name="convicted_of_felony">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.convicted_of_felony == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.convicted_of_felony == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="filed_bankruptcy">Filed Bankruptcy (10 yrs)?</label>
+                <select id="filed_bankruptcy" name="filed_bankruptcy">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.filed_bankruptcy == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.filed_bankruptcy == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="operates_other_businesses">Operates Other Businesses?</label>
+                <select id="operates_other_businesses" name="operates_other_businesses">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.operates_other_businesses == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.operates_other_businesses == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="losses_past_3_years">Losses in Past 3 Years?</label>
+                <select id="losses_past_3_years" name="losses_past_3_years">
+                    <option value="">-- Select --</option>
+                    <option value="true" {{ 'selected' if profile.losses_past_3_years == true }}>Yes</option>
+                    <option value="false" {{ 'selected' if profile.losses_past_3_years == false }}>No</option>
+                </select>
+            </div>
+            <div class="form-group full-width">
+                <label for="reason_for_shopping">Reason for Shopping</label>
+                <textarea id="reason_for_shopping" name="reason_for_shopping" rows="2">{{ profile.reason_for_shopping }}</textarea>
+            </div>
+        </div>
+    </fieldset>
+
+    <!-- SECTION 9: Desired Effective Date -->
+    <fieldset>
+        <legend>9. Coverage Details</legend>
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="effective_date">Desired Effective Date</label>
+                <input type="date" id="effective_date" name="effective_date" value="{{ profile.effective_date or '' }}">
+            </div>
+        </div>
+    </fieldset>
+
+    <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-lg">Save Prospect</button>
+        <a href="{{ url_for('index') }}" class="btn btn-lg">Cancel</a>
+    </div>
+</form>
+{% endblock %}
